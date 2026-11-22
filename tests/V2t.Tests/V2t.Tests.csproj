@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../app/V2t.Core/V2t.Core.csproj" />
+    <Compile Include="../../app/V2t.Windows/DictationShortcut.cs" />
+    <Compile Include="../../app/V2t.Windows/CorrectionSettingsStore.cs" />
+    <Compile Include="../../app/V2t.Windows/LocalModel.cs" />
+    <Compile Include="../../app/V2t.Windows/OpenRouterKeySource.cs" />
+    <Compile Include="../../app/V2t.Windows/UsageLog.cs" />
+    <Compile Include="../../app/V2t.Windows/DailyUsageLog.cs" />
+    <Compile Include="../../app/V2t.Windows/MicrophoneRecorder.cs" />
+    <Compile Include="../../app/V2t.Windows/SpeechAudioGate.cs" />
+    <Compile Include="../../app/V2t.Windows/WindowsInput.cs" />
+  </ItemGroup>
+</Project>

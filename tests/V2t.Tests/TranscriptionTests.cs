@@ -21,6 +21,7 @@ internal static class TranscriptionTests
         await SendsOpenRouterWithAutomaticLanguage();
         await SendsOpenRouterWithExplicitLanguage();
         await SendsMaiBackupRequests();
+        await RejectsMaiBackupWhenZdrRoutingFails();
         await ReadsUsageFromBothRequestPaths();
         await IgnoresInvalidOrMissingUsage();
         await SendsMixedLanguage();
@@ -93,18 +94,23 @@ internal static class TranscriptionTests
                 using var document = JsonDocument.Parse(await request.Content!.ReadAsByteArrayAsync(token));
                 var body = document.RootElement;
                 Check(body.GetProperty("model").GetString() == "microsoft/mai-transcribe-2", "Wrong MAI model.");
+                var hasProvider = body.TryGetProperty("provider", out var provider);
+                Check(hasProvider && provider.TryGetProperty("zdr", out var zdr) && zdr.ValueKind == JsonValueKind.True,
+                    "MAI backup must require ZDR routing on every request.");
+                Check(provider.GetProperty("data_collection").GetString() == "deny",
+                    "MAI backup must deny provider data collection.");
                 var audio = body.GetProperty("input_audio");
                 Check(audio.EnumerateObject().Count() == 2, "Unexpected input_audio fields.");
                 Check(audio.GetProperty("format").GetString() == "wav", "Expected WAV input.");
                 Check(audio.GetProperty("data").GetBytesFromBase64().SequenceEqual(Wave), "Base64 WAV changed in transit.");
                 if (expectedLanguage is null)
                 {
-                    Check(body.EnumerateObject().Count() == 2 && !body.TryGetProperty("language", out _),
+                    Check(body.EnumerateObject().Count() == 3 && !body.TryGetProperty("language", out _),
                         "Mixed or auto mode must leave language detection to MAI.");
                 }
                 else
                 {
-                    Check(body.EnumerateObject().Count() == 3 && body.GetProperty("language").GetString() == expectedLanguage,
+                    Check(body.EnumerateObject().Count() == 4 && body.GetProperty("language").GetString() == expectedLanguage,
                         "Expected the explicit MAI language hint.");
                 }
                 return Json(HttpStatusCode.OK, """{"text":"  สวัสดี world  "}""");
@@ -114,6 +120,20 @@ internal static class TranscriptionTests
                 "Expected the trimmed MAI transcript.");
             Check(requests == 1, "MAI should make exactly one request.");
         }
+    }
+
+    private static async Task RejectsMaiBackupWhenZdrRoutingFails()
+    {
+        var requests = 0;
+        using var http = new HttpClient(new Handler((_, _) =>
+        {
+            requests++;
+            return Task.FromResult(Json(HttpStatusCode.NotFound,
+                """{"error":{"message":"No endpoints available with zero data retention."}}"""));
+        }));
+        var client = new TranscriptionClient(http);
+        await ThrowsAsync<InvalidOperationException>(() => client.TranscribeMaiAsync(Wave, FakeKey, "th+en", default));
+        Check(requests == 1, "A rejected ZDR request must fail without retrying with weaker privacy settings.");
     }
 
     private static async Task SendsMixedLanguage()

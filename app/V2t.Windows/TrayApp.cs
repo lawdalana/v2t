@@ -39,6 +39,7 @@ internal sealed class TrayApp : ApplicationContext
     private FocusTarget target;
     private Task<bool>? pausedWorkers;
     private int warmingWorkers;
+    private bool retryInitialWarmup = true;
     private bool transcribing;
     private bool installing;
     private bool installingCorrection;
@@ -111,10 +112,18 @@ internal sealed class TrayApp : ApplicationContext
         SystemEvents.PowerModeChanged += CleanupUsageOnResume;
         SystemEvents.TimeChanged += CleanupUsageOnClockChange;
         ScheduleUsageCleanup(TimeSpan.Zero);
+        form.BeginInvoke(WarmInstalledModels);
+    }
+
+    private void WarmInstalledModels()
+    {
+        if (exiting)
+            return;
+
         if (settings.Provider == SpeechProvider.Local && LocalEngine.Available(settings.Language))
-            form.BeginInvoke(() => _ = WarmLocalAsync());
+            _ = WarmLocalAsync();
         if (corrections.EnableAi && LocalCorrectionEngine.Installed)
-            form.BeginInvoke(() => _ = WarmCorrectionAsync());
+            _ = WarmCorrectionAsync();
     }
 
     private void ResetShortcut(object sender, SessionSwitchEventArgs e)
@@ -387,6 +396,12 @@ internal sealed class TrayApp : ApplicationContext
             if (reason != before)
                 SetStatus($"MAI standby · {ResourceDescription(reason)}");
         }
+        else if (retryInitialWarmup && pausedWorkers is not null)
+        {
+            // A model can cause enough pressure to pause itself again after loading.
+            retryInitialWarmup = false;
+            WarmInstalledModels();
+        }
         else if (before != SpeechResourceReason.None)
         {
             SetStatus("Local will resume on the next dictation.");
@@ -464,6 +479,7 @@ internal sealed class TrayApp : ApplicationContext
 
         async Task<string> TranscribeLocal(CancellationToken token)
         {
+            retryInitialWarmup = false;
             await ResumeLocalWorkersAsync().WaitAsync(token);
             var client = await local.StartAsync(current.Language, token);
             return await TrackSpeechAsync(SpeechProvider.Local, local.ModelFileName ?? "Local Whisper",

@@ -89,7 +89,8 @@ public sealed class TranscriptionClient
         {
             model = OpenRouterMaiModel,
             input_audio = new { data = wave, format = "wav" },
-            language = languageCode == MixedThaiEnglish ? null : languageCode
+            language = languageCode == MixedThaiEnglish ? null : languageCode,
+            provider = new { zdr = true, data_collection = "deny" }
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, OpenRouterEndpoint);
         request.Headers.Authorization = authorization;

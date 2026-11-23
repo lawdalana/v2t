@@ -3,3 +3,4 @@
 publish/
 TestResults/
 .env*
+/app/v2t-rust/target/

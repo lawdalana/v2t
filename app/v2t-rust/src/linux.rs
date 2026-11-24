@@ -278,8 +278,10 @@ fn execute(action: Action) -> Result<()> {
 pub fn run() -> ExitCode {
     let args = env::args_os().skip(1);
     #[cfg(target_os = "macos")]
-    if args.len() == 0 && macos::is_app_bundle() {
-        return macos::run();
+    if args.len() == 0
+        && let Some(exit) = macos::run_from_bundle()
+    {
+        return exit;
     }
     let action = match parse(args) {
         Ok(action) => action,

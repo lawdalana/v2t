@@ -52,7 +52,7 @@ To enable local AI correction, run `./v2t setup --correction`, then add `--corre
 
 Use `--provider openai` or `--provider openrouter` to opt into cloud transcription with the respective `OPENAI_API_KEY` or `OPENROUTER_API_KEY` environment variable. In Local mode, add `--mai-backup` to enable the same ZDR-requested MAI backup on failure. Use the OpenRouter key with **ZDR only** configured as described above.
 
-## macOS menu bar (2.0 development build)
+## macOS desktop (2.0 development build)
 
 Build on macOS 12 or later with Rust and the Xcode command-line tools. Install `whisper-server` for the Mac's architecture. With Homebrew already installed, `brew install whisper.cpp` provides it. See the [Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp).
 
@@ -61,13 +61,17 @@ bash app/v2t-macos/build.sh
 open publish/V2t.app
 ```
 
-1. Open **v2t** in the menu bar. Choose **Install Speech Model** if you do not already have the local Thai and English model.
-2. Click **Start Recording** and allow v2t to use the microphone at the macOS prompt. Speak when the menu bar shows `v2t ●`.
-3. Click **Stop and Copy**. When v2t reports **Copied to clipboard**, switch to your destination app and press **⌘V**.
+1. In the v2t window, choose your **Dictation language** and **Hold to dictate** shortcut, then click **Save Settings**. Choose **Install Speech Model** if you need the local model for that language.
+2. Hold **Control + Shift + Space** to record. The first time, allow microphone access at the macOS prompt, then hold the shortcut again. Settings also offers **Command + Shift + Space**, **Control + F9**, **Right Command + Right Option (v2t active)**, and **Off**. Use the right-side pair while the v2t window has keyboard focus.
+3. Release the shortcut to transcribe and copy the result. A short sound plays when the transcript is ready. Press **⌘V** in your destination app. You can also use **Start Recording** and **Stop and Copy** in the window.
 
-The menu bar app uses the existing local Thai and English transcription pipeline. It runs in your user session and needs Microphone permission. You can grant it under **System Settings → Privacy & Security → Microphone**. On macOS 12, use **System Preferences → Security & Privacy → Privacy → Microphone**. Accessibility, Input Monitoring, Activity Monitor, and an administrator account are unnecessary for this workflow.
+Use **Copy** next to **Transcript** or **Copy Last Transcript** in the v2t menu bar menu to copy the latest result again.
 
-The CLI is available inside the bundle at `publish/V2t.app/Contents/MacOS/V2t`. If your `whisper-server` is installed outside the usual executable directories, you can start v2t from Terminal with `V2T_WHISPER_SERVER` set to its absolute path. Quit the menu bar app before rebuilding it. The build script signs the app locally for development.
+To start recording from Spotlight, keep **V2t Record.app** beside **V2t.app** in a Spotlight-indexed folder such as `~/Applications`. Press **⌘Space**, search for **V2t Record**, and press **Return**. In the v2t window, click **Stop and Copy** to finish.
+
+The v2t menu bar icon also lets you start or stop recording and reopen the window with **Settings…**. The app runs in your user session and needs Microphone permission. You can grant it under **System Settings → Privacy & Security → Microphone**. On macOS 12, use **System Preferences → Security & Privacy → Privacy → Microphone**.
+
+The CLI is available inside the bundle at `publish/V2t.app/Contents/MacOS/V2t`. If your `whisper-server` is installed outside the usual executable directories, you can start v2t from Terminal with `V2T_WHISPER_SERVER` set to its absolute path. Quit v2t before rebuilding it. The build script signs the app locally for development.
 
 ## Start V2T At Startup
 

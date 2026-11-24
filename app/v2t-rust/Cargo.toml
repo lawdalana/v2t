@@ -1,6 +1,6 @@
 [package]
 name = "v2t-desktop"
-version = "2.1.0"
+version = "2.2.0"
 description = "Voice typing for Windows, Linux, and macOS"
 edition = "2024"
 rust-version = "1.93"
@@ -33,7 +33,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std", "NSAlert", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl",
     "NSEvent", "NSFont", "NSGraphics", "NSMenu", "NSMenuItem", "NSPasteboard", "NSPopUpButton",
     "NSResponder", "NSScrollView", "NSSound", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSText",
-    "NSTextContainer", "NSTextField", "NSTextView", "NSView", "NSWindow", "block2",
+    "NSTableColumn", "NSTableHeaderView", "NSTableView", "NSTextContainer", "NSTextField",
+    "NSTextView", "NSUserInterfaceItemIdentification", "NSView", "NSWindow", "block2",
     "objc2-core-foundation",
 ] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = [

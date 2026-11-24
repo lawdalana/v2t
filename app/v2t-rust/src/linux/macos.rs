@@ -1,3 +1,4 @@
+mod dictionary;
 mod hotkey;
 mod launcher;
 mod modifiers;
@@ -37,6 +38,7 @@ use super::{
     pipeline,
 };
 use crate::models::LocalModels;
+use dictionary::DictionaryEditor;
 use hotkey::{Edge, Hotkey, Registration};
 use modifiers::ModifierShortcut;
 use preferences::{Preferences, Shortcut};
@@ -121,6 +123,7 @@ struct Menu {
     bar_item: Retained<NSStatusItem>,
     status: Retained<NSMenuItem>,
     open: Retained<NSMenuItem>,
+    dictionary: Retained<NSMenuItem>,
     record: Retained<NSMenuItem>,
     copy_last: Retained<NSMenuItem>,
     install: Retained<NSMenuItem>,
@@ -132,6 +135,7 @@ struct Menu {
 struct ControllerIvars {
     menu: Menu,
     window: MainWindow,
+    dictionary: Retained<DictionaryEditor>,
     completion_sound: Option<Retained<NSSound>>,
     preferences: Cell<Preferences>,
     hotkey: RefCell<Option<Hotkey>>,
@@ -219,6 +223,11 @@ define_class!(
         #[unsafe(method(showWindow:))]
         fn show_window(&self, _sender: &NSMenuItem) {
             self.present_window();
+        }
+
+        #[unsafe(method(showDictionary:))]
+        fn show_dictionary(&self, _sender: &NSObject) {
+            self.ivars().dictionary.show();
         }
 
         #[unsafe(method(toggleRecording:))]
@@ -316,6 +325,7 @@ impl Controller {
         let this = Self::alloc(main).set_ivars(ControllerIvars {
             menu: Menu::new(main),
             window: MainWindow::new(main, preferences),
+            dictionary: DictionaryEditor::new(main),
             completion_sound: NSSound::soundNamed(&NSString::from_str("Tink")),
             preferences: Cell::new(preferences),
             hotkey: RefCell::new(None),
@@ -332,6 +342,7 @@ impl Controller {
         unsafe {
             for item in [
                 &menu.open,
+                &menu.dictionary,
                 &menu.record,
                 &menu.copy_last,
                 &menu.install,
@@ -635,6 +646,7 @@ impl Menu {
         let status = menu_item(main, READY, None);
         status.setEnabled(false);
         let open = menu_item(main, "Settings…", Some(sel!(showWindow:)));
+        let dictionary = menu_item(main, "Dictionary…", Some(sel!(showDictionary:)));
         let record = menu_item(main, "Start Recording", Some(sel!(toggleRecording:)));
         let copy_last = menu_item(
             main,
@@ -644,7 +656,15 @@ impl Menu {
         copy_last.setEnabled(false);
         let install = menu_item(main, "Install Speech Model", Some(sel!(installModel:)));
         let quit = menu_item(main, "Quit v2t", Some(sel!(quitApp:)));
-        for item in [&status, &open, &record, &copy_last, &install, &quit] {
+        for item in [
+            &status,
+            &open,
+            &dictionary,
+            &record,
+            &copy_last,
+            &install,
+            &quit,
+        ] {
             menu.addItem(item);
         }
 
@@ -656,13 +676,18 @@ impl Menu {
         app_menu.addItem(&app_quit);
         add_submenu(&main_menu, main, &app_menu);
 
+        let cut = menu_item(main, "Cut", Some(sel!(cut:)));
+        cut.setKeyEquivalent(&NSString::from_str("x"));
         let copy = menu_item(main, "Copy", Some(sel!(copy:)));
         copy.setKeyEquivalent(&NSString::from_str("c"));
+        let paste = menu_item(main, "Paste", Some(sel!(paste:)));
+        paste.setKeyEquivalent(&NSString::from_str("v"));
         let select_all = menu_item(main, "Select All", Some(sel!(selectAll:)));
         select_all.setKeyEquivalent(&NSString::from_str("a"));
         let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(main), &NSString::from_str("Edit"));
-        edit_menu.addItem(&copy);
-        edit_menu.addItem(&select_all);
+        for item in [&cut, &copy, &paste, &select_all] {
+            edit_menu.addItem(item);
+        }
         add_submenu(&main_menu, main, &edit_menu);
 
         let close = menu_item(main, "Close Window", Some(sel!(performClose:)));
@@ -678,6 +703,7 @@ impl Menu {
             bar_item,
             status,
             open,
+            dictionary,
             record,
             copy_last,
             install,

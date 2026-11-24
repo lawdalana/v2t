@@ -23,6 +23,7 @@ pub(super) struct MainWindow {
     status: Retained<NSTextField>,
     language: Retained<NSPopUpButton>,
     shortcut: Retained<NSPopUpButton>,
+    dictionary: Retained<NSButton>,
     record: Retained<NSButton>,
     install: Retained<NSButton>,
     save: Retained<NSButton>,
@@ -56,9 +57,15 @@ impl MainWindow {
         let title = label(
             main,
             "Dictation settings",
-            rect(MARGIN, 399.0, CONTENT_WIDTH, 38.0),
+            rect(MARGIN, 399.0, CONTENT_WIDTH - 126.0, 38.0),
         );
         title.setFont(Some(&NSFont::boldSystemFontOfSize(29.0)));
+        let dictionary = button(
+            main,
+            "Dictionary…",
+            sel!(showDictionary:),
+            rect(WIDTH - MARGIN - 114.0, 401.0, 114.0, 34.0),
+        );
         let language_label = label(main, "Dictation language", rect(MARGIN, 362.0, 150.0, 20.0));
         let language = popup(
             main,
@@ -153,6 +160,7 @@ impl MainWindow {
         placeholder.setTextColor(Some(&NSColor::secondaryLabelColor()));
         for child in [
             &*title as &NSView,
+            &*dictionary,
             &*language_label,
             &*language,
             &*shortcut_label,
@@ -176,6 +184,7 @@ impl MainWindow {
             status,
             language,
             shortcut,
+            dictionary,
             record,
             install,
             save,
@@ -192,6 +201,7 @@ impl MainWindow {
             self.install.setTarget(Some(target));
             self.save.setTarget(Some(target));
             self.copy.setTarget(Some(target));
+            self.dictionary.setTarget(Some(target));
         }
     }
 
@@ -233,11 +243,11 @@ impl MainWindow {
     }
 }
 
-fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }
 
-fn label(main: MainThreadMarker, title: &str, frame: NSRect) -> Retained<NSTextField> {
+pub(super) fn label(main: MainThreadMarker, title: &str, frame: NSRect) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(title), main);
     label.setFrame(frame);
     label
@@ -257,7 +267,12 @@ fn popup(
     popup
 }
 
-fn button(main: MainThreadMarker, title: &str, action: Sel, frame: NSRect) -> Retained<NSButton> {
+pub(super) fn button(
+    main: MainThreadMarker,
+    title: &str,
+    action: Sel,
+    frame: NSRect,
+) -> Retained<NSButton> {
     // SAFETY: The controller registers this selector before the button can be used.
     let button = unsafe {
         NSButton::buttonWithTitle_target_action(

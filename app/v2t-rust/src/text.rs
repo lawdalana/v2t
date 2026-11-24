@@ -28,7 +28,11 @@ impl Default for Corrections {
 
 impl Corrections {
     pub fn load(dir: &Path) -> io::Result<Self> {
-        let Some(bytes) = read_bounded(&dir.join("correction.json"), 640 * 1024)? else {
+        Self::load_file(&dir.join("correction.json"))
+    }
+
+    pub fn load_file(file: &Path) -> io::Result<Self> {
+        let Some(bytes) = read_bounded(file, 640 * 1024)? else {
             return Ok(Self::default());
         };
         let value: Self = serde_json::from_slice(&bytes)
@@ -38,8 +42,12 @@ impl Corrections {
     }
 
     pub fn save(&self, dir: &Path) -> io::Result<()> {
+        self.save_file(&dir.join("correction.json"))
+    }
+
+    pub fn save_file(&self, file: &Path) -> io::Result<()> {
         self.validate()?;
-        save_json(&dir.join("correction.json"), self)
+        save_json(file, self)
     }
 
     fn validate(&self) -> io::Result<()> {

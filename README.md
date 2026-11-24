@@ -1,6 +1,6 @@
 # v2t
 
-Voice typing for Windows and Linux, with a macOS 2.1 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
+Voice typing for Windows and Linux, with a macOS 2.2 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
 
 ## Windows desktop
 
@@ -52,7 +52,7 @@ To enable local AI correction, run `./v2t setup --correction`, then add `--corre
 
 Use `--provider openai` or `--provider openrouter` to opt into cloud transcription with the respective `OPENAI_API_KEY` or `OPENROUTER_API_KEY` environment variable. In Local mode, add `--mai-backup` to enable the same ZDR-requested MAI backup on failure. Use the OpenRouter key with **ZDR only** configured as described above.
 
-## macOS desktop (2.1 development build)
+## macOS desktop (2.2 development build)
 
 Build on macOS 12 or later with Rust and the Xcode command-line tools. Install `whisper-server` for the Mac's architecture. With Homebrew already installed, `brew install whisper.cpp` provides it. See the [Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp).
 
@@ -66,6 +66,8 @@ open publish/V2t.app
 3. Release the shortcut to transcribe and copy the result. A short sound plays when the transcript is ready. Press **⌘V** in your destination app. You can also use **Start Recording** and **Stop and Copy** in the window.
 
 Use **Copy** next to **Transcript** or **Copy Last Transcript** in the v2t menu bar menu to copy the latest result again.
+
+Open **Dictionary…** from the v2t window or menu bar to add spoken phrases and their replacements. Select a saved rule to update or remove it. Changes are saved immediately and apply to the next transcription.
 
 To start recording from Spotlight, keep **V2t Record.app** beside **V2t.app** in a Spotlight-indexed folder such as `~/Applications`. Press **⌘Space**, search for **V2t Record**, and press **Return**. In the v2t window, click **Stop and Copy** to finish.
 

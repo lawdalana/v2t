@@ -1,6 +1,6 @@
 # v2t
 
-Voice typing for Windows and Linux, with a macOS 2.0 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
+Voice typing for Windows and Linux, with a macOS 2.1 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
 
 ## Windows desktop
 
@@ -52,7 +52,7 @@ To enable local AI correction, run `./v2t setup --correction`, then add `--corre
 
 Use `--provider openai` or `--provider openrouter` to opt into cloud transcription with the respective `OPENAI_API_KEY` or `OPENROUTER_API_KEY` environment variable. In Local mode, add `--mai-backup` to enable the same ZDR-requested MAI backup on failure. Use the OpenRouter key with **ZDR only** configured as described above.
 
-## macOS desktop (2.0 development build)
+## macOS desktop (2.1 development build)
 
 Build on macOS 12 or later with Rust and the Xcode command-line tools. Install `whisper-server` for the Mac's architecture. With Homebrew already installed, `brew install whisper.cpp` provides it. See the [Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp).
 

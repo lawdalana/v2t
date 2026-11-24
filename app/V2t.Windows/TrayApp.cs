@@ -76,6 +76,7 @@ internal sealed class TrayApp : ApplicationContext
 
         openRouterKey = OpenRouterKeySource.Resolve(settings.OpenRouterKey, AppContext.BaseDirectory);
         form = new SettingsForm(settings, ApplySettings);
+        form.StartupRequested += SetStartup;
         _ = form.Handle;
         form.InstallRequested += language => _ = InstallLocalAsync(language);
         form.DictionaryRequested += ShowDictionary;
@@ -820,8 +821,42 @@ internal sealed class TrayApp : ApplicationContext
 
     private void ShowSettings()
     {
+        RefreshStartup();
         form.Show();
         form.Activate();
+    }
+
+    private bool RefreshStartup()
+    {
+        try
+        {
+            form.SetStartAtLogin(LoginStartup.ForCurrentUser().Enabled);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            System.Runtime.InteropServices.COMException)
+        {
+            form.SetStartAtLogin(null);
+            SetStatus($"Could not check Windows Startup. {error.Message}");
+            return false;
+        }
+    }
+
+    private void SetStartup(bool enabled)
+    {
+        try
+        {
+            LoginStartup.ForCurrentUser().SetEnabled(enabled);
+            if (RefreshStartup())
+                SetStatus(enabled ? "v2t will start in the background when you sign in." :
+                    "v2t will stay closed when you sign in.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            System.Runtime.InteropServices.COMException)
+        {
+            RefreshStartup();
+            SetStatus($"Could not update Windows Startup. {error.Message}", notify: true);
+        }
     }
 
     protected override void ExitThreadCore()

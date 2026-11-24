@@ -1,6 +1,6 @@
 # v2t
 
-Voice typing for Windows and Linux. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download the package for your system from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
+Voice typing for Windows and Linux, with a macOS 2.0 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
 
 ## Windows desktop
 
@@ -51,6 +51,39 @@ The Linux binary prints the transcript to stdout. WAV input is 16 kHz, mono, sig
 To enable local AI correction, run `./v2t setup --correction`, then add `--correct` to `record` or `transcribe`. v2t uses `$XDG_DATA_HOME/v2t` for downloaded models and usage logs, or `~/.local/share/v2t` by default. Optional dictionary entries use `$XDG_CONFIG_HOME/v2t/correction.json`, or `~/.config/v2t/correction.json`, with the same `Entries` format as on Windows. Source builds can use `whisper-server` and `llama-server` from the binary's directory or PATH. Set `V2T_WHISPER_SERVER` or `V2T_LLAMA_SERVER` to an absolute executable path to select a different backend.
 
 Use `--provider openai` or `--provider openrouter` to opt into cloud transcription with the respective `OPENAI_API_KEY` or `OPENROUTER_API_KEY` environment variable. In Local mode, add `--mai-backup` to enable the same ZDR-requested MAI backup on failure. Use the OpenRouter key with **ZDR only** configured as described above.
+
+## macOS menu bar (2.0 development build)
+
+Build on macOS 12 or later with Rust and the Xcode command-line tools. Install `whisper-server` for the Mac's architecture. With Homebrew already installed, `brew install whisper.cpp` provides it. See the [Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp).
+
+```bash
+bash app/v2t-macos/build.sh
+open publish/V2t.app
+```
+
+1. Open **v2t** in the menu bar. Choose **Install Speech Model** if you do not already have the local Thai and English model.
+2. Click **Start Recording** and allow v2t to use the microphone at the macOS prompt. Speak when the menu bar shows `v2t ●`.
+3. Click **Stop and Copy**. When v2t reports **Copied to clipboard**, switch to your destination app and press **⌘V**.
+
+The menu bar app uses the existing local Thai and English transcription pipeline. It runs in your user session and needs Microphone permission. You can grant it under **System Settings → Privacy & Security → Microphone**. On macOS 12, use **System Preferences → Security & Privacy → Privacy → Microphone**. Accessibility, Input Monitoring, Activity Monitor, and an administrator account are unnecessary for this workflow.
+
+The CLI is available inside the bundle at `publish/V2t.app/Contents/MacOS/V2t`. If your `whisper-server` is installed outside the usual executable directories, you can start v2t from Terminal with `V2T_WHISPER_SERVER` set to its absolute path. Quit the menu bar app before rebuilding it. The build script signs the app locally for development.
+
+## Start V2T At Startup
+
+On Windows, open **Settings** from the tray and tick **Start V2T At Startup**. This applies immediately in both Windows editions. The next time you sign in, Windows launches v2t in the tray and prepares the installed local models.
+
+Linux and macOS use the same CLI for dictation and login settings. Run `v2t settings`, set **Start V2T At Startup**, and confirm. On Linux, the dialog uses `zenity`. On macOS, it uses the built-in system dialog. The CLI can manage the same preference.
+
+```bash
+v2t startup enable
+v2t startup status
+v2t startup disable
+```
+
+Linux uses the desktop session's autostart folder and macOS uses a per-user LaunchAgent. At login, v2t prepares installed models and keeps them available to `record` and `transcribe` through a private local socket. Audio capture starts with `record`. Run `v2t stop-background` to stop the current worker. The startup checkbox controls future logins. If you move the executable, open Settings from its new location and enable startup there.
+
+For a macOS source build, use Rust and the Xcode command-line tools. The CLI looks for macOS builds of `whisper-server` and `llama-server` beside it, on PATH, or in the usual Homebrew binary directories. Use `ffmpeg` with AVFoundation and allow your terminal to use the microphone for `v2t record`. The default model and configuration directory is `~/Library/Application Support/v2t`.
 
 ## Build and test
 

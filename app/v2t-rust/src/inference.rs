@@ -48,7 +48,7 @@ impl SpeechProvider {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpeechResult {
     pub text: String,
     pub billed_seconds: Option<f64>,

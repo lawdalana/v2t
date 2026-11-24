@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -9,17 +9,17 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use sha2::{Digest as _, Sha256};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use zip::ZipArchive;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use super::{CORRECTION_ENGINE_PATH, SPEECH_ENGINE_PATH};
 use super::{CORRECTION_MODEL_FILE, SpeechModel, random_hex};
 use crate::inference::InferenceError;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const MAX_ARCHIVE_BYTES: u64 = 1 << 30;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const MAX_EXPANDED_BYTES: u64 = 2 << 30;
 const MAX_MODEL_BYTES: u64 = 4 << 30;
 
@@ -29,13 +29,13 @@ pub(super) struct Asset {
     pub(super) sha256: &'static str,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const SPEECH_ENGINE: Asset = Asset {
     url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
     sha256: "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
 };
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const CORRECTION_ENGINE: Asset = Asset {
     url: "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-win-vulkan-x64.zip",
     sha256: "720d59998a51423a1c50c99326a5d5358b80e89d75f8fdafc50a26479d1bad68",
@@ -53,7 +53,7 @@ pub(super) fn install_speech_asset(
 ) -> Result<(), InferenceError> {
     fs::create_dir_all(directory).map_err(installation_error)?;
     let client = download_client(Duration::from_secs(600))?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if !directory.join(SPEECH_ENGINE_PATH).is_file() {
         report("Downloading the local engine…");
         install_engine(
@@ -86,7 +86,7 @@ pub(super) fn install_correction_assets(
 ) -> Result<(), InferenceError> {
     fs::create_dir_all(directory).map_err(installation_error)?;
     let client = download_client(Duration::from_secs(900))?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if !directory.join(CORRECTION_ENGINE_PATH).is_file() {
         report("Downloading the AI engine…");
         install_engine(
@@ -128,7 +128,7 @@ fn download_client(timeout: Duration) -> Result<Client, InferenceError> {
         .map_err(|_| InferenceError::Unavailable("Could not initialize model downloads."))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn install_engine(
     client: &Client,
     directory: &Path,
@@ -226,7 +226,7 @@ fn stream_verified(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn unpack(archive: &Path, directory: &Path) -> Result<(), InferenceError> {
     let file = File::open(archive).map_err(installation_error)?;
     let mut archive = ZipArchive::new(file).map_err(|_| invalid_archive())?;
@@ -320,7 +320,7 @@ fn installation_error(_error: io::Error) -> InferenceError {
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn invalid_archive() -> InferenceError {
     InferenceError::Unavailable("The engine archive could not be safely extracted.")
 }

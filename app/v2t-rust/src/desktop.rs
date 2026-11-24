@@ -7,8 +7,11 @@ use crate::{
     input::{self, FocusTarget, Keyboard},
     resource::{Reason, Routing},
     system::{Instance, Probe},
+    windows_startup::Startup,
 };
-use dialog::{APPLY, DICT_INSTALL, DICT_LIST, DICT_RETURN, DICT_SAVE, DICTIONARY, INSTALL};
+use dialog::{
+    APPLY, DICT_INSTALL, DICT_LIST, DICT_RETURN, DICT_SAVE, DICTIONARY, INSTALL, START_AT_LOGIN,
+};
 use std::{
     cell::{Cell, RefCell},
     env, io,
@@ -63,15 +66,18 @@ enum Event {
 }
 
 pub fn run() -> io::Result<()> {
+    let background = env::args_os().any(|arg| arg == "--background");
     let Some(_instance) = Instance::acquire()? else {
-        startup_error(&io::Error::other(
-            "v2t is already running. Open Settings from the Windows tray.",
-        ));
+        if !background {
+            startup_error(&io::Error::other(
+                "v2t is already running. Open Settings from the Windows tray.",
+            ));
+        }
         return Ok(());
     };
-    let background = env::args_os().any(|arg| arg == "--background");
     let dir = config::data_dir()?;
     let mut executable = env::current_exe()?;
+    let startup = Startup::new(executable.clone());
     executable.pop();
 
     let (preferences, load_message) = Preferences::load(&dir, &executable);
@@ -129,6 +135,7 @@ pub fn run() -> io::Result<()> {
         availability,
         dir,
         executable,
+        startup,
         preferences,
         recording: None,
         next_capture_id: 0,
@@ -152,7 +159,7 @@ pub fn run() -> io::Result<()> {
     }
     desktop.warm(reason == Reason::None);
     if !background {
-        desktop.form.show_settings(&desktop.preferences.settings);
+        desktop.show_settings();
     }
 
     // SAFETY: the structure is an out parameter for GetMessageW on the UI thread.
@@ -224,6 +231,7 @@ struct Desktop {
     availability: Rc<Cell<Option<&'static str>>>,
     dir: PathBuf,
     executable: PathBuf,
+    startup: Startup,
     preferences: Preferences,
     recording: Option<Recording>,
     next_capture_id: u64,
@@ -261,7 +269,7 @@ impl Desktop {
                 x if x == DICTIONARY as usize => {
                     self.form.show_dictionary(&self.preferences.corrections)
                 }
-                x if x == APPLY as usize => self.form.show_settings(&self.preferences.settings),
+                x if x == APPLY as usize => self.show_settings(),
                 _ => (),
             },
             Event::Tick => self.tick(),
@@ -538,9 +546,10 @@ impl Desktop {
                 Ok(())
             }
             DICT_RETURN => {
-                self.form.show_settings(&self.preferences.settings);
+                self.show_settings();
                 Ok(())
             }
+            START_AT_LOGIN => self.change_startup(),
             DICT_SAVE => self.save_dictionary(),
             DICT_LIST => {
                 self.form.row_selected();
@@ -555,6 +564,36 @@ impl Desktop {
         if let Err(error) = result {
             self.status(&error.to_string(), true);
         }
+    }
+
+    fn show_settings(&self) {
+        if let Err(error) = self.refresh_startup() {
+            self.status(&format!("Could not check Windows Startup. {error}"), false);
+        }
+        self.form.show_settings(&self.preferences.settings);
+    }
+
+    fn refresh_startup(&self) -> io::Result<()> {
+        let enabled = self.startup.enabled();
+        self.form.set_start_at_login(enabled.as_ref().ok().copied());
+        enabled.map(|_| ())
+    }
+
+    fn change_startup(&self) -> io::Result<()> {
+        let enabled = self.form.starts_at_login();
+        let changed = self.startup.set_enabled(enabled);
+        let refreshed = self.refresh_startup();
+        changed?;
+        refreshed?;
+        self.status(
+            if enabled {
+                "v2t will start in the background when you sign in."
+            } else {
+                "v2t will stay closed when you sign in."
+            },
+            false,
+        );
+        Ok(())
     }
 
     fn apply(&mut self) -> io::Result<()> {
@@ -737,5 +776,9 @@ mod tests {
         assert_eq!(result.open_ai_key.as_str(), "synthetic-api-fixture");
         form.clear_secret_controls();
         assert!(form.settings().unwrap().open_ai_key.is_empty());
+        form.set_start_at_login(Some(true));
+        assert!(form.starts_at_login());
+        form.set_start_at_login(Some(false));
+        assert!(!form.starts_at_login());
     }
 }

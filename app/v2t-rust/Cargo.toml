@@ -1,7 +1,7 @@
 [package]
 name = "v2t-desktop"
-version = "1.0.0"
-description = "Voice typing for Windows and Linux"
+version = "2.0.0"
+description = "Voice typing for Windows, Linux, and macOS"
 edition = "2024"
 rust-version = "1.93"
 publish = false
@@ -23,7 +23,31 @@ unicode-general-category = "1"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 zeroize = "1.8"
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "NSApplication", "NSButton", "NSControl", "NSMenu", "NSMenuItem", "NSPasteboard",
+    "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "objc2-core-foundation",
+] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "AVCaptureDevice", "AVMediaFormat", "block2",
+] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
+    "std", "AVAudioFormat", "AVAudioRecorder", "AVAudioTypes",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "NSBundle", "NSRunLoop", "NSTimer", "NSURL",
+] }
+tempfile = "3.27"
+
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell",
+] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

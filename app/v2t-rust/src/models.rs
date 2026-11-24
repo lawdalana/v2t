@@ -1,5 +1,5 @@
 mod assets;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
 
 use std::fmt::Write as _;
@@ -19,11 +19,11 @@ use reqwest::blocking::Client;
 use self::assets::{Asset, install_correction_assets, install_speech_asset};
 use crate::inference::{self, InferenceError, MIXED, SpeechResult};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const SPEECH_ENGINE_PATH: &str = "b5454/Release/whisper-server.exe";
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const CUDA_ENGINE_PATH: &str = "b5454-cuda/Release/whisper-server.exe";
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const CORRECTION_ENGINE_PATH: &str = "b12633/llama-server.exe";
 pub const CORRECTION_MODEL_FILE: &str = "typhoon2.5-qwen3-4b-q4_k_m.gguf";
 const STARTUP_POLL: Duration = Duration::from_millis(120);
@@ -116,22 +116,22 @@ impl LocalModels {
     }
 
     fn speech_engine(&self) -> Result<PathBuf, InferenceError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             linux::Engine::Speech.resolve()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Ok(self.speech_dir.join(SPEECH_ENGINE_PATH))
         }
     }
 
     fn correction_engine(&self) -> Result<PathBuf, InferenceError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             linux::Engine::Correction.resolve()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Ok(self.correction_dir.join(CORRECTION_ENGINE_PATH))
         }
@@ -215,9 +215,9 @@ impl LocalModels {
         self.suspend_speech();
 
         let budget = Budget::new(timeout);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let gpu = self.speech_dir.join(CUDA_ENGINE_PATH);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let worker = if gpu.is_file() {
             match self.start_speech(&gpu, model, true, budget) {
                 Ok(worker) => worker,
@@ -226,7 +226,7 @@ impl LocalModels {
         } else {
             self.start_speech(&cpu, model, false, budget)?
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let worker = self.start_speech(&cpu, model, false, budget)?;
         self.speech_worker = Some(worker);
         Ok(model)
@@ -296,9 +296,9 @@ impl LocalModels {
     pub fn warm_correction(&mut self, timeout: Duration) -> Result<(), InferenceError> {
         let executable = self.correction_engine()?;
         if !executable.is_file() || !self.correction_dir.join(CORRECTION_MODEL_FILE).is_file() {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let message = "Install the local AI model with v2t setup --correction.";
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let message = "Install the local AI model in Dictionary & AI.";
             return Err(InferenceError::Unavailable(message));
         }
@@ -419,24 +419,24 @@ impl LocalModels {
         report: impl FnMut(&str),
     ) -> Result<(), InferenceError> {
         let language = inference::normalize_language(language)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.speech_engine()?;
         install_speech_asset(&self.speech_dir, preferred(language.as_deref()), report)
     }
 
     pub fn install_correction(&self, report: impl FnMut(&str)) -> Result<(), InferenceError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.correction_engine()?;
         install_correction_assets(&self.correction_dir, report)
     }
 }
 
 fn speech_setup_message() -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         "Install the speech model with v2t setup and the same language."
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         "Open v2t settings and install the local model."
     }
@@ -602,17 +602,17 @@ fn command_for(executable: &Path) -> Command {
         .stderr(Stdio::null());
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     linux::configure_command(&mut command);
     command
 }
 
 fn vulkan_present() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         false
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     std::env::var_os("SystemRoot").is_some_and(|root| {
         PathBuf::from(root)
             .join("System32")
@@ -648,7 +648,7 @@ fn random_hex<const N: usize>() -> Result<String, InferenceError> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn dropping_a_local_worker_reaps_its_child() {
         let mut command = command_for(Path::new("/bin/sleep"));

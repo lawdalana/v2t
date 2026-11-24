@@ -1,4 +1,7 @@
-use super::{APPLY, COPY, DICT_LIST, DICT_RETURN, DICTIONARY, EVENTS, EXIT, Event, WAKE, enqueue};
+use super::{
+    APPLY, COPY, DICT_LIST, DICT_RETURN, DICTIONARY, EVENTS, EXIT, Event, START_AT_LOGIN, WAKE,
+    enqueue,
+};
 use std::{
     cell::Cell,
     io, mem,
@@ -136,7 +139,7 @@ fn control_command(wparam: WPARAM) -> Option<Event> {
     let accepted = if id == DICT_LIST {
         notification == LBN_SELCHANGE
     } else {
-        (APPLY..DICT_LIST).contains(&id) && notification == BN_CLICKED
+        (APPLY..=START_AT_LOGIN).contains(&id) && notification == BN_CLICKED
     };
     accepted.then_some(Event::Action(id))
 }

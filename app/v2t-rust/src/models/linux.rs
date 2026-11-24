@@ -28,13 +28,28 @@ impl Engine {
 
     pub(super) fn resolve(self) -> Result<PathBuf, InferenceError> {
         let executable = std::env::current_exe().ok();
+        let override_path = std::env::var_os(self.variable());
+        let search_path = std::env::var_os("PATH");
+        #[cfg(target_os = "macos")]
+        let search_path = mac_search_path(search_path.as_deref());
         resolve_at(
             self,
-            std::env::var_os(self.variable()).as_deref(),
+            override_path.as_deref(),
             executable.as_deref().and_then(Path::parent),
-            std::env::var_os("PATH").as_deref(),
+            search_path.as_deref(),
         )
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_search_path(path: Option<&OsStr>) -> Option<std::ffi::OsString> {
+    // Login agents may start with the system PATH before shell setup runs.
+    let default = [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    let supplied = path.unwrap_or_default();
+    std::env::join_paths(std::env::split_paths(supplied).chain(default)).ok()
 }
 
 fn resolve_at(

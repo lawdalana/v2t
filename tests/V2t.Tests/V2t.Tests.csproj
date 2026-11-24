@@ -11,6 +11,7 @@
     <Compile Include="../../app/V2t.Windows/DictationShortcut.cs" />
     <Compile Include="../../app/V2t.Windows/CorrectionSettingsStore.cs" />
     <Compile Include="../../app/V2t.Windows/LocalModel.cs" />
+    <Compile Include="../../app/V2t.Windows/LoginStartup.cs" />
     <Compile Include="../../app/V2t.Windows/OpenRouterKeySource.cs" />
     <Compile Include="../../app/V2t.Windows/UsageLog.cs" />
     <Compile Include="../../app/V2t.Windows/DailyUsageLog.cs" />

@@ -1,5 +1,12 @@
 mod audio;
+mod background;
+#[cfg(any(target_os = "macos", test))]
+mod clipboard;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos;
 mod pipeline;
+mod startup;
 
 use std::{
     env,
@@ -17,12 +24,16 @@ use crate::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const HELP: &str = "v2t for Linux
+const HELP: &str = "v2t for Linux and macOS
 
 Usage:
   v2t transcribe <WAV> [speech options]
   v2t record [--seconds <1..300>] [speech options]
   v2t setup [--language <LANG>] [--correction]
+  v2t settings
+  v2t startup <enable|disable|status>
+  v2t --background
+  v2t stop-background
   v2t --help
   v2t --version
 
@@ -33,7 +44,7 @@ Speech options:
   --correct                         Apply optional local AI correction
 
 WAV input: 16 kHz mono signed 16-bit PCM, up to five minutes.
-Recording uses parec with PulseAudio or pipewire-pulse (default: five seconds).
+Recording uses parec on Linux and ffmpeg on macOS (default: five seconds).
 The transcript is written to stdout. Setup downloads the selected speech model,
 or the local AI correction model with --correction. Cloud credentials come from
 OPENAI_API_KEY or OPENROUTER_API_KEY for the selected provider.
@@ -43,6 +54,10 @@ OPENAI_API_KEY or OPENROUTER_API_KEY for the selected provider.
 enum Action {
     Help,
     Version,
+    Settings,
+    Startup(StartupAction),
+    Background,
+    StopBackground,
     Setup {
         language: Option<&'static str>,
         correction: bool,
@@ -55,6 +70,13 @@ enum Action {
         seconds: u16,
         options: SpeechOptions,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartupAction {
+    Enable,
+    Disable,
+    Status,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -84,6 +106,21 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Action
     let mode = match command.to_str() {
         Some("--help" | "-h" | "help") => return Ok(Action::Help),
         Some("--version" | "-V") if args.next().is_none() => return Ok(Action::Version),
+        Some("settings") if args.next().is_none() => return Ok(Action::Settings),
+        Some("--background") if args.next().is_none() => return Ok(Action::Background),
+        Some("stop-background") if args.next().is_none() => return Ok(Action::StopBackground),
+        Some("startup") => {
+            let action = match args.next().as_deref().and_then(|value| value.to_str()) {
+                Some("enable") => StartupAction::Enable,
+                Some("disable") => StartupAction::Disable,
+                Some("status") => StartupAction::Status,
+                _ => return Err("Use v2t startup enable, disable, or status."),
+            };
+            if args.next().is_some() {
+                return Err("Startup takes one argument.");
+            }
+            return Ok(Action::Startup(action));
+        }
         Some(mode @ ("transcribe" | "record" | "setup")) => mode,
         _ => return Err("Unknown command. Use v2t --help for usage."),
     };
@@ -168,9 +205,14 @@ impl Storage {
                 .map(|base| base.join("v2t"))
                 .ok_or("Set HOME or the XDG configuration and data directories.")
         };
+        #[cfg(target_os = "linux")]
+        let (default_data, default_config) = (".local/share", ".config");
+        #[cfg(target_os = "macos")]
+        let (default_data, default_config) =
+            ("Library/Application Support", "Library/Application Support");
         Ok(Self {
-            data: subdir("XDG_DATA_HOME", ".local/share")?,
-            config: subdir("XDG_CONFIG_HOME", ".config")?,
+            data: subdir("XDG_DATA_HOME", default_data)?,
+            config: subdir("XDG_CONFIG_HOME", default_config)?,
         })
     }
 }
@@ -180,6 +222,28 @@ fn execute(action: Action) -> Result<()> {
     match action {
         Action::Help => output(HELP.trim_end())?,
         Action::Version => output(concat!("v2t ", env!("CARGO_PKG_VERSION")))?,
+        Action::Settings => startup::edit_settings()?,
+        Action::Startup(action) => {
+            match action {
+                StartupAction::Enable => startup::set_enabled(true)?,
+                StartupAction::Disable => startup::set_enabled(false)?,
+                StartupAction::Status => {}
+            }
+            output(if startup::enabled()? {
+                "Start V2T At Startup: enabled."
+            } else {
+                "Start V2T At Startup: disabled."
+            })?;
+        }
+        Action::Background => background::run(&Storage::resolve()?)?,
+        Action::StopBackground => {
+            let stopped = background::stop(&Storage::resolve()?.data)?;
+            output(if stopped {
+                "v2t background process stopped."
+            } else {
+                "v2t background process is not running."
+            })?;
+        }
         Action::Setup {
             language,
             correction,
@@ -212,7 +276,12 @@ fn execute(action: Action) -> Result<()> {
 }
 
 pub fn run() -> ExitCode {
-    let action = match parse(env::args_os().skip(1)) {
+    let args = env::args_os().skip(1);
+    #[cfg(target_os = "macos")]
+    if args.len() == 0 && macos::is_app_bundle() {
+        return macos::run();
+    }
+    let action = match parse(args) {
         Ok(action) => action,
         Err(error) => {
             eprintln!("v2t: {error}");
@@ -236,6 +305,17 @@ mod tests {
         parse(args.iter().map(OsString::from))
     }
 
+    #[test]
+    fn separates_startup_preference_from_worker_commands() {
+        assert_eq!(command(&["settings"]), Ok(Action::Settings));
+        assert_eq!(
+            command(&["startup", "enable"]),
+            Ok(Action::Startup(StartupAction::Enable))
+        );
+        assert_eq!(command(&["--background"]), Ok(Action::Background));
+        assert_eq!(command(&["stop-background"]), Ok(Action::StopBackground));
+        assert!(command(&["startup", "enable", "extra"]).is_err());
+    }
     #[test]
     fn transcribe_defaults_to_offline_mixed_language() {
         assert_eq!(

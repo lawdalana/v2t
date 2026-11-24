@@ -28,6 +28,7 @@ internal sealed class SettingsForm : Form
     private readonly TextBox openAiKey = new() { UseSystemPasswordChar = true, MaxLength = 512 };
     private readonly TextBox openRouterKey = new() { UseSystemPasswordChar = true, MaxLength = 512 };
     private readonly CheckBox maiBackup = new() { Text = "Use &MAI-Transcribe-2 as backup" };
+    private readonly CheckBox startAtLogin = new() { Text = "Start V2T At Startup", Enabled = false };
     private readonly Button localSetup = new() { Text = "Setup", AccessibleName = "Setup local speech model", AutoSize = true };
     private readonly Label status = new() { LiveSetting = AutomationLiveSetting.Polite };
     private readonly Font bodyFont = new("Segoe UI", 10);
@@ -77,6 +78,7 @@ internal sealed class SettingsForm : Form
             ApplyChoice(applied with { Provider = (SpeechProvider)provider.SelectedIndex });
         language.SelectedIndexChanged += (_, _) => ApplyChoice(applied with { Language = SelectedLanguage });
         maiBackup.CheckedChanged += (_, _) => ApplyChoice(applied with { EnableMaiBackup = maiBackup.Checked });
+        startAtLogin.Click += (_, _) => StartupRequested?.Invoke(startAtLogin.Checked);
         openAiKey.Text = settings.OpenAiKey;
         openRouterKey.Text = settings.OpenRouterKey;
         commitOpenAiKey = BindApiKey(openAiKey, value => value.OpenAiKey,
@@ -205,6 +207,9 @@ internal sealed class SettingsForm : Form
         AddCardRow(card, languageHelp);
         AddCardRow(card, TextLabel("Dictation shortcut", emphasisFont));
         AddCardRow(card, BuildShortcutControl());
+        startAtLogin.Dock = DockStyle.Top;
+        startAtLogin.AutoSize = true;
+        AddCardRow(card, startAtLogin);
         return card;
     }
 
@@ -287,6 +292,13 @@ internal sealed class SettingsForm : Form
 
     public event Action<string?>? InstallRequested;
     public event Action? DictionaryRequested;
+    public event Action<bool>? StartupRequested;
+
+    internal void SetStartAtLogin(bool? enabled)
+    {
+        startAtLogin.Checked = enabled ?? false;
+        startAtLogin.Enabled = enabled.HasValue;
+    }
 
     public void SetStatus(string message) => status.Text = message;
 

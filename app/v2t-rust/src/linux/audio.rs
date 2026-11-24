@@ -35,16 +35,8 @@ pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
     if !(1..=MAX_SECONDS).contains(&seconds) {
         return Err(invalid("Recording duration must be from 1 to 300 seconds."));
     }
-    let mut child = Command::new("parec");
+    let mut child = recorder_command();
     child
-        .args([
-            "--raw",
-            "--format=s16le",
-            "--rate=16000",
-            "--channels=1",
-            "--latency-msec=100",
-            "--client-name=v2t",
-        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -57,10 +49,7 @@ pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
         child.env_remove(key);
     }
     let mut capture = Capture(child.spawn().map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => io::Error::new(
-            io::ErrorKind::NotFound,
-            "Install parec (pulse-utils or pulseaudio-utils) for microphone recording.",
-        ),
+        io::ErrorKind::NotFound => io::Error::new(io::ErrorKind::NotFound, RECORDER_REQUIRED),
         _ => io::Error::other("Could not start the microphone recorder."),
     })?);
     let mut stream = capture
@@ -84,9 +73,7 @@ pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
         .map_err(|_| io::Error::other("The microphone reader stopped unexpectedly."))?;
     match result {
         Ok(Ok(samples)) => Ok(encode(&samples)),
-        Ok(Err(_)) => Err(io::Error::other(
-            "Microphone recording failed. Check PulseAudio or pipewire-pulse and the default source.",
-        )),
+        Ok(Err(_)) => Err(io::Error::other(RECORDER_FAILED)),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "Microphone recording timed out.",
@@ -95,6 +82,57 @@ pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
             "The microphone reader stopped unexpectedly.",
         )),
     }
+}
+
+#[cfg(target_os = "linux")]
+const RECORDER_REQUIRED: &str =
+    "Install parec (pulse-utils or pulseaudio-utils) for microphone recording.";
+#[cfg(target_os = "linux")]
+const RECORDER_FAILED: &str =
+    "Microphone recording failed. Check PulseAudio or pipewire-pulse and the default source.";
+
+#[cfg(target_os = "linux")]
+fn recorder_command() -> Command {
+    let mut command = Command::new("parec");
+    command.args([
+        "--raw",
+        "--format=s16le",
+        "--rate=16000",
+        "--channels=1",
+        "--latency-msec=100",
+        "--client-name=v2t",
+    ]);
+    command
+}
+
+#[cfg(target_os = "macos")]
+const RECORDER_REQUIRED: &str =
+    "Install ffmpeg with AVFoundation support for microphone recording.";
+#[cfg(target_os = "macos")]
+const RECORDER_FAILED: &str = "Microphone recording failed. Check microphone access for your terminal and the default audio input.";
+
+#[cfg(target_os = "macos")]
+fn recorder_command() -> Command {
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-f",
+        "avfoundation",
+        "-i",
+        "none:default",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]);
+    command
 }
 
 struct Capture(Child);

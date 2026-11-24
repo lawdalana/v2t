@@ -77,6 +77,7 @@ AssertEx.Equal("", DictationText.ForInsertion("\r\n\0\t"));
 AssertEx.Equal("one two", DictationText.ForInsertion("one\u2028two"));
 Console.WriteLine("DictationText: 3 tests passed");
 NativeInputTests.Run();
+LoginStartupTests.Run();
 SpeechAudioGateTests.Run();
 OpenRouterKeySourceTests.Run();
 UsageLogTests.Run();

@@ -27,6 +27,7 @@ pub const DICT_ADD: u16 = 106;
 pub const DICT_UPDATE: u16 = 107;
 pub const DICT_REMOVE: u16 = 108;
 pub const DICT_LIST: u16 = 109;
+pub const START_AT_LOGIN: u16 = 110;
 
 pub struct Form {
     pub window: HWND,
@@ -37,6 +38,7 @@ pub struct Form {
     openai: HWND,
     openrouter: HWND,
     backup: HWND,
+    start_at_login: HWND,
     shortcut: HWND,
     status: HWND,
     speech_install: HWND,
@@ -96,10 +98,17 @@ impl Form {
         settings.label("Hold to dictate", 24, 229, 145)?;
         let shortcut = settings.edit(180, 224, 180, 48, false)?;
         settings.label("Ctrl+Shift or Ctrl+F9", 372, 229, 192)?;
+        let start_at_login = settings.control(
+            w!("BUTTON"),
+            "Start V2T At Startup",
+            START_AT_LOGIN,
+            WS_TABSTOP | BS_AUTOCHECKBOX as u32,
+            (180, 252, 384, 24),
+        )?;
         let speech_install =
-            settings.button("Set up local speech model", INSTALL, (24, 276, 190, 32))?;
-        settings.button("Dictionary && AI…", DICTIONARY, (224, 276, 165, 32))?;
-        settings.button("Save settings", APPLY, (414, 276, 150, 32))?;
+            settings.button("Set up local speech model", INSTALL, (24, 282, 190, 32))?;
+        settings.button("Dictionary && AI…", DICTIONARY, (224, 282, 165, 32))?;
+        settings.button("Save settings", APPLY, (414, 282, 150, 32))?;
 
         let mut dict = Layout::new(window);
         let ai = dict.control(
@@ -140,6 +149,7 @@ impl Form {
             openai,
             openrouter,
             backup,
+            start_at_login,
             shortcut,
             status,
             speech_install,
@@ -200,6 +210,21 @@ impl Form {
 
     pub fn status(&self, message: &str) {
         caption(self.status, message);
+    }
+
+    pub fn set_start_at_login(&self, enabled: Option<bool>) {
+        check(self.start_at_login, enabled.unwrap_or_default());
+        // SAFETY: this button belongs to the live form on its owning thread.
+        unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                self.start_at_login,
+                i32::from(enabled.is_some()),
+            );
+        }
+    }
+
+    pub fn starts_at_login(&self) -> bool {
+        checked(self.start_at_login)
     }
 
     pub fn installation_buttons(&self, installing: bool, speech: bool, correction: bool) {

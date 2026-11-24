@@ -5,7 +5,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-use super::{Result, SpeechOptions, Storage, audio};
+use super::{Result, SpeechOptions, Storage, audio, background};
 use crate::{
     config::Settings,
     inference::{
@@ -101,14 +101,17 @@ pub(super) fn transcribe(
         eprintln!("Local AI correction is unavailable. Using dictionary replacements.");
         return Ok(Some(mapped));
     }
-    eprintln!("Loading the local AI correction model…");
     let started = local_now();
     let elapsed = Instant::now();
-    let result = models
-        .warm_correction(CORRECTION_STARTUP_TIMEOUT)
-        .and_then(|()| {
-            eprintln!("Correcting text with local AI…");
-            models.correct(&mapped, &protected, CORRECTION_TIMEOUT)
+    let result = background::correct(&storage.data, &mapped, &protected, CORRECTION_TIMEOUT)
+        .unwrap_or_else(|| {
+            eprintln!("Loading the local AI correction model…");
+            models
+                .warm_correction(CORRECTION_STARTUP_TIMEOUT)
+                .and_then(|()| {
+                    eprintln!("Correcting text with local AI…");
+                    models.correct(&mapped, &protected, CORRECTION_TIMEOUT)
+                })
         });
     let outcome = match &result {
         Ok(Some(_)) => "ok",
@@ -180,10 +183,13 @@ fn recognize(
         Some(_) => Duration::from_secs_f64((5.0 + seconds / 4.0).min(60.0)),
         None => REQUEST_TIMEOUT,
     };
-    let result = models.speech(wave, options.language, local_budget);
-    let model = models
-        .loaded_speech()
-        .map_or("Local Whisper", |model| model.file);
+    let (model, result) = background::speech(data, wave, options.language, local_budget)
+        .unwrap_or_else(|| {
+            let result = models.speech(wave, options.language, local_budget);
+            let model = models.loaded_speech().map(|model| model.file.to_owned());
+            (model, result)
+        });
+    let model = model.as_deref().unwrap_or("Local Whisper");
     attempt.log(data, log, SpeechProvider::Local, model, &result);
     let Some(key) = &credentials.backup else {
         return Ok(result?);

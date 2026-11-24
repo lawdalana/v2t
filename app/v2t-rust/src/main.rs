@@ -13,7 +13,7 @@ mod speech_gate;
 mod text;
 mod usage;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
 
 #[cfg(windows)]
@@ -33,6 +33,9 @@ mod input;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod system;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_startup;
 
 #[cfg(windows)]
 fn main() {
@@ -41,13 +44,13 @@ fn main() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> std::process::ExitCode {
     linux::run()
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn main() -> std::process::ExitCode {
-    eprintln!("v2t supports Windows and Linux.");
+    eprintln!("v2t supports Windows, Linux, and macOS.");
     std::process::ExitCode::FAILURE
 }

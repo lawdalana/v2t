@@ -1,6 +1,7 @@
+mod file_picker;
 mod store;
 
-use std::cell::RefCell;
+use std::{cell::RefCell, io, path::PathBuf};
 
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -36,6 +37,8 @@ pub(super) struct DictionaryControls {
     save: Retained<NSButton>,
     remove: Retained<NSButton>,
     new: Retained<NSButton>,
+    import: Retained<NSButton>,
+    export: Retained<NSButton>,
     status: Retained<NSTextField>,
     dictionary: RefCell<Option<Dictionary>>,
 }
@@ -115,6 +118,45 @@ define_class!(
                 self.apply(Change::Remove { row }, "Rule removed.");
             }
         }
+
+        #[unsafe(method(importDictionary:))]
+        fn import_dictionary(&self, _sender: &NSButton) {
+            if self.form_has_changes() {
+                self.set_status("Save the current rule or click New before importing.");
+                return;
+            }
+            let Some(path) = self.chosen_path(file_picker::open(self.mtm())) else {
+                return;
+            };
+            let result = self.ivars().dictionary.borrow_mut().as_mut()
+                .map(|dictionary| dictionary.import(&path));
+            match result {
+                Some(Ok(added)) => {
+                    self.ivars().table.reloadData();
+                    self.reset_form();
+                    match added {
+                        0 => self.set_status("No new rules to import."),
+                        1 => self.set_status("Imported 1 new rule."),
+                        count => self.set_status(&format!("Imported {count} new rules.")),
+                    }
+                }
+                Some(Err(error)) => self.set_status(&error.to_string()),
+                None => (),
+            }
+        }
+
+        #[unsafe(method(exportDictionary:))]
+        fn export_dictionary(&self, _sender: &NSButton) {
+            let Some(path) = self.chosen_path(file_picker::save(self.mtm())) else {
+                return;
+            };
+            let dictionary = self.ivars().dictionary.borrow();
+            match dictionary.as_ref().map(|dictionary| dictionary.export(&path)) {
+                Some(Ok(())) => self.set_status("Dictionary exported."),
+                Some(Err(error)) => self.set_status(&error.to_string()),
+                None => (),
+            }
+        }
     }
 );
 
@@ -132,7 +174,13 @@ impl DictionaryEditor {
             controls
                 .table
                 .setDelegate(Some(ProtocolObject::from_ref(&*this)));
-            for button in [&controls.new, &controls.save, &controls.remove] {
+            for button in [
+                &controls.new,
+                &controls.save,
+                &controls.remove,
+                &controls.import,
+                &controls.export,
+            ] {
                 button.setTarget(Some(this.as_super()));
             }
         }
@@ -166,6 +214,22 @@ impl DictionaryEditor {
 
     fn selected_row(&self) -> Option<usize> {
         self.ivars().table.selectedRow().try_into().ok()
+    }
+
+    fn chosen_path(&self, selection: io::Result<Option<PathBuf>>) -> Option<PathBuf> {
+        match selection {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_status(&error.to_string());
+                None
+            }
+        }
+    }
+
+    fn set_status(&self, status: &str) {
+        self.ivars()
+            .status
+            .setStringValue(&NSString::from_str(status));
     }
 
     fn cell_value(
@@ -233,6 +297,8 @@ impl DictionaryEditor {
         controls.new.setEnabled(available);
         controls.save.setEnabled(available);
         controls.remove.setEnabled(editing);
+        controls.import.setEnabled(available);
+        controls.export.setEnabled(available);
         controls
             .save
             .setTitle(&NSString::from_str(if editing { "Update" } else { "Add" }));
@@ -302,6 +368,18 @@ impl DictionaryControls {
             sel!(removeDictionaryEntry:),
             rect(126.0, 298.0, 115.0, 34.0),
         );
+        let import = button(
+            main,
+            "Import…",
+            sel!(importDictionary:),
+            rect(253.0, 298.0, 90.0, 34.0),
+        );
+        let export = button(
+            main,
+            "Export…",
+            sel!(exportDictionary:),
+            rect(355.0, 298.0, 90.0, 34.0),
+        );
         let save = button(
             main,
             "Add",
@@ -350,6 +428,8 @@ impl DictionaryControls {
             &*replacement,
             &*new,
             &*remove,
+            &*import,
+            &*export,
             &*save,
             &*scroll,
             &*status,
@@ -366,6 +446,8 @@ impl DictionaryControls {
             save,
             remove,
             new,
+            import,
+            export,
             status,
             dictionary: RefCell::new(None),
         }

@@ -10,12 +10,13 @@ use crate::{
     windows_startup::Startup,
 };
 use dialog::{
-    APPLY, DICT_INSTALL, DICT_LIST, DICT_RETURN, DICT_SAVE, DICTIONARY, INSTALL, START_AT_LOGIN,
+    APPLY, DICT_EXPORT, DICT_IMPORT, DICT_INSTALL, DICT_LIST, DICT_RETURN, DICT_SAVE, DICTIONARY,
+    INSTALL, START_AT_LOGIN,
 };
 use std::{
     cell::{Cell, RefCell},
     env, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::null_mut,
     rc::Rc,
     sync::{
@@ -31,6 +32,7 @@ use windows_sys::{
     w,
 };
 
+mod file_dialog;
 mod window;
 use window::{Tray, Window};
 
@@ -621,6 +623,8 @@ impl Desktop {
             }
             START_AT_LOGIN => self.change_startup(),
             DICT_SAVE => self.save_dictionary(),
+            DICT_IMPORT => self.dictionary_transfer(file_dialog::Mode::Import),
+            DICT_EXPORT => self.dictionary_transfer(file_dialog::Mode::Export),
             DICT_LIST => {
                 self.form.row_selected();
                 Ok(())
@@ -698,6 +702,37 @@ impl Desktop {
         let allow_warmup = self.resource_reason_now();
         self.warm(allow_warmup);
         self.status("Dictionary saved.", false);
+        Ok(())
+    }
+
+    fn dictionary_transfer(&mut self, mode: file_dialog::Mode) -> io::Result<()> {
+        if self.recording.is_some() || self.installing {
+            return Err(config::invalid(
+                "Finish the current operation before transferring the dictionary.",
+            ));
+        }
+        let previously_accepted = self.accepts.replace(false);
+        let selected = file_dialog::choose_dictionary(self.form.window, mode);
+        self.accepts.set(previously_accepted);
+        let Some(path) = selected? else {
+            return Ok(());
+        };
+        match mode {
+            file_dialog::Mode::Import => {
+                let added = self.form.import_dictionary(&path)?;
+                let message = match added {
+                    0 => "No new dictionary entries.".to_owned(),
+                    1 => "Imported 1 entry. Use Save dictionary to apply it.".to_owned(),
+                    _ => format!("Imported {added} entries. Use Save dictionary to apply them."),
+                };
+                self.status(&message, false);
+            }
+            file_dialog::Mode::Export => {
+                check_dictionary_export_path(&path, &self.dir.join("correction.json"))?;
+                self.form.corrections().export_dictionary(&path)?;
+                self.status("Dictionary exported.", false);
+            }
+        }
         Ok(())
     }
 
@@ -801,6 +836,27 @@ impl Desktop {
     }
 }
 
+fn check_dictionary_export_path(destination: &Path, active: &Path) -> io::Result<()> {
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        path.canonicalize().ok().or_else(|| {
+            let parent = path.parent()?.canonicalize().ok()?;
+            Some(parent.join(path.file_name()?))
+        })
+    }
+    if destination.as_os_str().eq_ignore_ascii_case(active)
+        || resolved(destination)
+            .zip(resolved(active))
+            .is_some_and(|(destination, active)| {
+                destination.as_os_str().eq_ignore_ascii_case(active)
+            })
+    {
+        return Err(config::invalid(
+            "Choose a different file to export your dictionary.",
+        ));
+    }
+    Ok(())
+}
+
 fn recording_unavailable(preferences: &Preferences, local_available: bool) -> Option<&'static str> {
     match preferences.settings.provider {
         SpeechProvider::Local if !local_available && !preferences.can_backup() => {
@@ -819,12 +875,15 @@ fn recording_unavailable(preferences: &Preferences, local_available: bool) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shortcut::Binding;
+    use crate::{
+        shortcut::Binding,
+        text::{Corrections, Entry},
+    };
 
     #[test]
-    fn native_settings_controls_round_trip_without_opening_the_microphone() {
+    fn native_settings_and_dictionary_controls_round_trip_without_opening_the_microphone() {
         let window = Window::create().unwrap();
-        let form = Form::create(window.0).unwrap();
+        let mut form = Form::create(window.0).unwrap();
         let mut settings = config::Settings {
             provider: SpeechProvider::OpenRouter,
             language: Some("th".into()),
@@ -846,5 +905,51 @@ mod tests {
         assert!(form.starts_at_login());
         form.set_start_at_login(Some(false));
         assert!(!form.starts_at_login());
+
+        let directory = tempfile::tempdir().unwrap();
+        let import_path = directory.path().join("นำเข้า.json");
+        let export_path = directory.path().join("ส่งออก.json");
+        let draft = Corrections {
+            enable_ai: false,
+            entries: vec![Entry {
+                spoken: "AI".into(),
+                replacement: "Existing".into(),
+            }],
+        };
+        std::fs::write(
+            &import_path,
+            r#"{"Entries":[{"Spoken":"ai","Replacement":"Incoming"},{"Spoken":"วีทูที","Replacement":"v2t"}]}"#,
+        )
+        .unwrap();
+        form.fill_dictionary(&draft);
+        assert_eq!(form.import_dictionary(&import_path).unwrap(), 1);
+        for id in [dialog::DICT_IMPORT, dialog::DICT_EXPORT] {
+            // SAFETY: the form window and its native controls live on this test thread.
+            assert!(!unsafe { GetDlgItem(window.0, i32::from(id)) }.is_null());
+        }
+        // SAFETY: the list box is a live child of the form on this thread.
+        let row_count = unsafe {
+            let rows = GetDlgItem(window.0, i32::from(DICT_LIST));
+            SendMessageW(rows, LB_GETCOUNT, 0, 0)
+        };
+        assert_eq!(row_count, 2);
+        let merged = form.corrections();
+        assert!(!merged.enable_ai);
+        assert_eq!(merged.apply("AI วีทูที").0, "Existing v2t");
+        std::fs::write(&export_path, "previous backup").unwrap();
+        merged.export_dictionary(&export_path).unwrap();
+        assert_eq!(
+            draft.import_dictionary(&export_path).unwrap().entries.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn refuses_to_export_over_the_active_dictionary() {
+        let folder = tempfile::tempdir().unwrap();
+        let active = folder.path().join("correction.json");
+        let alias = folder.path().join(".").join("CORRECTION.JSON");
+        assert!(check_dictionary_export_path(&alias, &active).is_err());
+        assert!(check_dictionary_export_path(&folder.path().join("backup.json"), &active).is_ok());
     }
 }

@@ -1,5 +1,5 @@
 use super::{
-    APPLY, COPY, DICT_LIST, DICT_RETURN, DICTIONARY, EVENTS, EXIT, Event, START_AT_LOGIN, WAKE,
+    APPLY, COPY, DICT_EXPORT, DICT_LIST, DICT_RETURN, DICTIONARY, EVENTS, EXIT, Event, WAKE,
     enqueue,
 };
 use std::{
@@ -139,9 +139,24 @@ fn control_command(wparam: WPARAM) -> Option<Event> {
     let accepted = if id == DICT_LIST {
         notification == LBN_SELCHANGE
     } else {
-        (APPLY..=START_AT_LOGIN).contains(&id) && notification == BN_CLICKED
+        (APPLY..=DICT_EXPORT).contains(&id) && notification == BN_CLICKED
     };
     accepted.then_some(Event::Action(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatches_dictionary_transfer_buttons() {
+        for id in [crate::dialog::DICT_IMPORT, crate::dialog::DICT_EXPORT] {
+            assert!(matches!(
+                control_command(usize::from(id)),
+                Some(Event::Action(command)) if command == id
+            ));
+        }
+    }
 }
 
 pub(super) struct Tray {

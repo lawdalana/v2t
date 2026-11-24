@@ -4,7 +4,7 @@ use crate::{
     shortcut::Binding,
     text::{Corrections, Entry},
 };
-use std::{io, ptr::null_mut};
+use std::{io, path::Path, ptr::null_mut};
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
@@ -28,6 +28,8 @@ pub const DICT_UPDATE: u16 = 107;
 pub const DICT_REMOVE: u16 = 108;
 pub const DICT_LIST: u16 = 109;
 pub const START_AT_LOGIN: u16 = 110;
+pub const DICT_IMPORT: u16 = 111;
+pub const DICT_EXPORT: u16 = 112;
 
 pub struct Form {
     pub window: HWND,
@@ -131,11 +133,13 @@ impl Form {
         dict.label("Replacement", 304, 216, 260)?;
         let spoken = dict.edit(24, 237, 260, 160, false)?;
         let replacement = dict.edit(304, 237, 260, 160, false)?;
-        dict.button("Add", DICT_ADD, (24, 277, 78, 31))?;
-        dict.button("Update", DICT_UPDATE, (108, 277, 78, 31))?;
-        dict.button("Remove", DICT_REMOVE, (192, 277, 78, 31))?;
-        dict.button("Back", DICT_RETURN, (344, 277, 77, 31))?;
-        dict.button("Save dictionary", DICT_SAVE, (429, 277, 135, 31))?;
+        dict.button("Add", DICT_ADD, (24, 277, 54, 31))?;
+        dict.button("Update", DICT_UPDATE, (84, 277, 70, 31))?;
+        dict.button("Remove", DICT_REMOVE, (160, 277, 68, 31))?;
+        dict.button("Import…", DICT_IMPORT, (239, 277, 68, 31))?;
+        dict.button("Export…", DICT_EXPORT, (313, 277, 68, 31))?;
+        dict.button("Back", DICT_RETURN, (392, 277, 54, 31))?;
+        dict.button("Save dictionary", DICT_SAVE, (452, 277, 112, 31))?;
 
         let status =
             Layout::new(window).control(w!("STATIC"), "", 0, SS_LEFT, (24, 328, 540, 48))?;
@@ -186,13 +190,17 @@ impl Form {
     }
 
     pub fn show_dictionary(&mut self, corrections: &Corrections) {
+        self.fill_dictionary(corrections);
+        self.show();
+    }
+
+    pub(crate) fn fill_dictionary(&mut self, corrections: &Corrections) {
         self.edit_entries = corrections.entries.clone();
         self.refresh_rows(None);
         check(self.ai, corrections.enable_ai);
         caption(self.window, "v2t Dictionary & AI");
         set_visible(&self.settings_controls, false);
         set_visible(&self.dictionary_controls, true);
-        self.show();
     }
 
     fn show(&self) {
@@ -293,6 +301,21 @@ impl Form {
             enable_ai: checked(self.ai),
             entries: self.edit_entries.clone(),
         }
+    }
+
+    pub fn import_dictionary(&mut self, path: &Path) -> io::Result<usize> {
+        let updated = self.corrections().import_dictionary(path)?;
+        let added = updated.entries.len() - self.edit_entries.len();
+        if added > 0 {
+            let selected = self.selection();
+            let spoken = read_text(self.spoken, 160)?;
+            let replacement = read_text(self.replacement, 160)?;
+            self.edit_entries = updated.entries;
+            self.refresh_rows(selected);
+            caption(self.spoken, &spoken);
+            caption(self.replacement, &replacement);
+        }
+        Ok(added)
     }
 
     pub fn row_selected(&self) {

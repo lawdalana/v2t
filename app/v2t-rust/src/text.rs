@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io, path::Path};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+const DICTIONARY_FILE_LIMIT: u64 = 640 * 1024;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Entry {
@@ -16,6 +18,12 @@ pub struct Corrections {
     pub enable_ai: bool,
     #[serde(rename = "Entries", default, deserialize_with = "entries_or_empty")]
     pub entries: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+struct DictionaryImport {
+    #[serde(rename = "Entries")]
+    entries: Vec<Entry>,
 }
 
 impl Default for Corrections {
@@ -33,12 +41,12 @@ impl Corrections {
     }
 
     pub fn load_file(file: &Path) -> io::Result<Self> {
-        let Some(bytes) = read_bounded(file, 640 * 1024)? else {
+        let Some(bytes) = read_bounded(file, DICTIONARY_FILE_LIMIT)? else {
             return Ok(Self::default());
         };
         let value: Self = serde_json::from_slice(&bytes)
             .map_err(|_| invalid("The saved dictionary is invalid."))?;
-        value.validate()?;
+        validate_entries(&value.entries)?;
         Ok(value)
     }
 
@@ -47,35 +55,40 @@ impl Corrections {
     }
 
     pub fn save_file(&self, file: &Path) -> io::Result<()> {
-        self.validate()?;
+        validate_entries(&self.entries)?;
         save_json(file, self)
     }
 
-    fn validate(&self) -> io::Result<()> {
-        if self.entries.len() > 300 {
-            return Err(invalid("The dictionary can have up to 300 entries."));
+    pub fn export_dictionary(&self, file: &Path) -> io::Result<()> {
+        self.save_file(file)
+    }
+
+    pub fn import_dictionary(&self, file: &Path) -> io::Result<Self> {
+        if !file.metadata()?.is_file() {
+            return Err(invalid("Choose a regular JSON dictionary file."));
         }
-        let mut terms = HashSet::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            for field in [&entry.spoken, &entry.replacement] {
-                if field.trim().is_empty()
-                    || field.encode_utf16().count() > 160
-                    || field.chars().any(char::is_control)
-                {
-                    return Err(invalid(&format!(
-                        "Dictionary row {} needs both terms, up to 160 characters each.",
-                        index + 1
-                    )));
-                }
-            }
-            if !terms.insert(folded(&entry.spoken)) {
-                return Err(invalid(&format!(
-                    "Dictionary row {} repeats a spoken term.",
-                    index + 1
-                )));
-            }
-        }
-        Ok(())
+        let bytes = read_bounded(file, DICTIONARY_FILE_LIMIT)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "The dictionary file is missing.")
+        })?;
+        let json = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+        let imported: DictionaryImport = serde_json::from_slice(json)
+            .map_err(|_| invalid("The import file must contain a valid JSON Entries list."))?;
+        validate_entries(&imported.entries)?;
+
+        let mut merged = self.clone();
+        let mut known: HashSet<_> = self
+            .entries
+            .iter()
+            .map(|entry| folded(&entry.spoken))
+            .collect();
+        merged.entries.extend(
+            imported
+                .entries
+                .into_iter()
+                .filter(|entry| known.insert(folded(&entry.spoken))),
+        );
+        validate_entries(&merged.entries)?;
+        Ok(merged)
     }
 
     pub fn apply(&self, input: &str) -> (String, Vec<String>) {
@@ -143,6 +156,33 @@ impl Corrections {
         }
         (output, applied)
     }
+}
+
+fn validate_entries(entries: &[Entry]) -> io::Result<()> {
+    if entries.len() > 300 {
+        return Err(invalid("The dictionary can have up to 300 entries."));
+    }
+    let mut terms = HashSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        for field in [&entry.spoken, &entry.replacement] {
+            if field.trim().is_empty()
+                || field.encode_utf16().count() > 160
+                || field.chars().any(char::is_control)
+            {
+                return Err(invalid(&format!(
+                    "Dictionary row {} needs both terms, up to 160 characters each.",
+                    index + 1
+                )));
+            }
+        }
+        if !terms.insert(folded(&entry.spoken)) {
+            return Err(invalid(&format!(
+                "Dictionary row {} repeats a spoken term.",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn fold(ch: char) -> char {
@@ -244,6 +284,97 @@ pub fn append_transcript(output: &mut String, transcript: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn entry(spoken: &str, replacement: &str) -> Entry {
+        Entry {
+            spoken: spoken.into(),
+            replacement: replacement.into(),
+        }
+    }
+
+    #[test]
+    fn imports_an_export_and_preserves_existing_rules_and_ai_preference() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup = directory.path().join("พจนานุกรม.json");
+        let source = Corrections {
+            enable_ai: true,
+            entries: vec![entry("ai", "A.I."), entry("โอเพ่นเราเตอร์", "OpenRouter")],
+        };
+        source.export_dictionary(&backup).unwrap();
+        assert_eq!(Corrections::load_file(&backup).unwrap().entries.len(), 2);
+
+        let destination = Corrections {
+            enable_ai: false,
+            entries: vec![entry("AI", "เอไอ"), entry("วีทูที", "v2t")],
+        };
+        let imported = destination.import_dictionary(&backup).unwrap();
+        assert_eq!(destination.entries.len(), 2);
+        assert!(!imported.enable_ai);
+        assert_eq!(imported.entries.len(), 3);
+        assert_eq!(
+            imported.apply("ai วีทูที โอเพ่นเราเตอร์").0,
+            "เอไอ v2t OpenRouter"
+        );
+    }
+
+    #[test]
+    fn accepts_an_entries_only_file_with_a_utf8_bom() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("dictionary.json");
+        fs::write(
+            &file,
+            b"\xef\xbb\xbf{\"Entries\":[{\"Spoken\":\"v two t\",\"Replacement\":\"v2t\"}]}",
+        )
+        .unwrap();
+        let current = Corrections::default();
+        let imported = current.import_dictionary(&file).unwrap();
+        assert_eq!(imported.apply("v two t").0, "v2t");
+    }
+
+    #[test]
+    fn rejects_invalid_imports_instead_of_treating_them_as_empty_exports() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("dictionary.json");
+        let current = Corrections::default();
+        assert_eq!(
+            current.import_dictionary(&file).err().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        for malformed in [
+            r#"{}"#,
+            r#"{"Entries":null}"#,
+            r#"{"Entries":[{"Spoken":"word","Replacement":" "}]}"#,
+            r#"{"Entries":[{"Spoken":"word","Replacement":"first"},{"Spoken":"WORD","Replacement":"second"}]}"#,
+        ] {
+            fs::write(&file, malformed).unwrap();
+            assert_eq!(
+                current.import_dictionary(&file).err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        fs::write(&file, vec![b' '; 640 * 1024 + 1]).unwrap();
+        assert!(current.import_dictionary(&file).is_err());
+    }
+
+    #[test]
+    fn rejects_a_merge_that_would_exceed_the_dictionary_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("dictionary.json");
+        fs::write(
+            &file,
+            r#"{"Entries":[{"Spoken":"one extra","Replacement":"extra"}]}"#,
+        )
+        .unwrap();
+        let current = Corrections {
+            enable_ai: false,
+            entries: (0..300)
+                .map(|index| entry(&format!("term {index}"), "replacement"))
+                .collect(),
+        };
+        let error = current.import_dictionary(&file).err().unwrap();
+        assert!(error.to_string().contains("300 entries"));
+    }
 
     #[test]
     fn joins_segments_in_order_with_phrase_spacing() {

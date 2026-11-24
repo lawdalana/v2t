@@ -192,10 +192,10 @@ fn write_link(
     Ok(())
 }
 
-struct Apartment;
+pub(crate) struct Apartment;
 
 impl Apartment {
-    fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         // SAFETY: this operates on the current thread. Drop balances success.
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }.map_err(io::Error::other)?;
         Ok(Self)

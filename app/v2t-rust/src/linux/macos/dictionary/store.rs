@@ -1,8 +1,8 @@
 use std::{
     fs::{self, OpenOptions, TryLockError},
     io,
-    os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -32,6 +32,50 @@ impl Dictionary {
     }
 
     pub(super) fn change(&mut self, change: Change) -> io::Result<()> {
+        let (file, _lock) = self.lock_file()?;
+        let mut updated = Corrections::load_file(&file)?;
+        match change {
+            Change::Add(entry) => updated.entries.push(entry),
+            Change::Update { row, entry } => {
+                let row = self.current_row(row, &updated)?;
+                updated.entries[row] = entry;
+            }
+            Change::Remove { row } => {
+                let row = self.current_row(row, &updated)?;
+                updated.entries.remove(row);
+            }
+        }
+        updated.save_file(&file)?;
+        self.rules = updated;
+        Ok(())
+    }
+
+    pub(super) fn import(&mut self, source: &Path) -> io::Result<usize> {
+        let (file, _lock) = self.lock_file()?;
+        let current = Corrections::load_file(&file)?;
+        let updated = current.import_dictionary(source)?;
+        let added = updated.entries.len() - current.entries.len();
+        if added > 0 {
+            updated.save_file(&file)?;
+        }
+        self.rules = updated;
+        Ok(added)
+    }
+
+    pub(super) fn export(&self, destination: &Path) -> io::Result<()> {
+        let active = self.directory.join("correction.json");
+        let same_name_and_directory = active.file_name() == destination.file_name()
+            && active
+                .parent()
+                .zip(destination.parent())
+                .is_some_and(|(active, destination)| same_file(active, destination));
+        if destination == active || same_name_and_directory || same_file(&active, destination) {
+            return Err(invalid("Choose a different file to export the dictionary."));
+        }
+        Corrections::load_file(&active)?.export_dictionary(destination)
+    }
+
+    fn lock_file(&self) -> io::Result<(PathBuf, fs::File)> {
         fs::create_dir_all(&self.directory)?;
         let file = self.directory.join("correction.json");
         let file = match file.symlink_metadata() {
@@ -54,21 +98,7 @@ impl Dictionary {
             ),
             TryLockError::Error(error) => error,
         })?;
-        let mut updated = Corrections::load_file(&file)?;
-        match change {
-            Change::Add(entry) => updated.entries.push(entry),
-            Change::Update { row, entry } => {
-                let row = self.current_row(row, &updated)?;
-                updated.entries[row] = entry;
-            }
-            Change::Remove { row } => {
-                let row = self.current_row(row, &updated)?;
-                updated.entries.remove(row);
-            }
-        }
-        updated.save_file(&file)?;
-        self.rules = updated;
-        Ok(())
+        Ok((file, lock))
     }
 
     fn current_row(&self, row: usize, updated: &Corrections) -> io::Result<usize> {
@@ -84,6 +114,13 @@ impl Dictionary {
     }
 }
 
+fn same_file(left: &Path, right: &Path) -> bool {
+    matches!(
+        (fs::metadata(left), fs::metadata(right)),
+        (Ok(left), Ok(right)) if (left.dev(), left.ino()) == (right.dev(), right.ino())
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +130,85 @@ mod tests {
             spoken: spoken.into(),
             replacement: replacement.into(),
         }
+    }
+
+    #[test]
+    fn import_reloads_saved_rules_before_merging_and_saves_the_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        Corrections {
+            enable_ai: false,
+            entries: vec![entry("speaker", "Speaker")],
+        }
+        .save(root)
+        .unwrap();
+        let mut importing = Dictionary::load(root.to_owned()).unwrap();
+        let mut other_editor = Dictionary::load(root.to_owned()).unwrap();
+        other_editor
+            .change(Change::Add(entry("วีทูที", "v2t")))
+            .unwrap();
+
+        let incoming = root.join("from-windows.json");
+        Corrections {
+            enable_ai: true,
+            entries: vec![entry("SPEAKER", "Replaced"), entry("สวัสดี", "Hello")],
+        }
+        .save_file(&incoming)
+        .unwrap();
+
+        assert_eq!(importing.import(&incoming).unwrap(), 1);
+        assert_eq!(importing.entries().len(), 3);
+        let saved = Corrections::load(root).unwrap();
+        assert!(!saved.enable_ai);
+        assert_eq!(saved.apply("speaker วีทูที สวัสดี").0, "Speaker v2t Hello");
+    }
+
+    #[test]
+    fn export_contains_saved_edits_from_another_editor() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let exporting = Dictionary::load(root.to_owned()).unwrap();
+        let mut other_editor = Dictionary::load(root.to_owned()).unwrap();
+        other_editor
+            .change(Change::Add(entry("สวัสดี", "Hello")))
+            .unwrap();
+
+        let exported = root.join("v2t-dictionary.json");
+        exporting.export(&exported).unwrap();
+        let exported = Corrections::load_file(&exported).unwrap();
+        assert_eq!(exported.apply("สวัสดี").0, "Hello");
+    }
+
+    #[test]
+    fn export_preserves_active_dictionary_links_and_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let active = root.join("correction.json");
+        let target = root.join("actual-rules.json");
+        let alias = root.join("alias.json");
+        Corrections::default().export_dictionary(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &active).unwrap();
+        fs::hard_link(&target, &alias).unwrap();
+        let dictionary = Dictionary::load(root.to_owned()).unwrap();
+
+        assert!(dictionary.export(&active).is_err());
+        assert!(dictionary.export(&target).is_err());
+        assert!(dictionary.export(&alias).is_err());
+        assert!(active.symlink_metadata().unwrap().is_symlink());
+    }
+
+    #[test]
+    fn export_rejects_a_missing_active_dictionary_via_a_directory_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let settings = root.join("settings");
+        let alias = root.join("config-alias");
+        fs::create_dir(&settings).unwrap();
+        std::os::unix::fs::symlink(&settings, &alias).unwrap();
+        let dictionary = Dictionary::load(settings.clone()).unwrap();
+
+        assert!(dictionary.export(&alias.join("correction.json")).is_err());
+        assert!(!settings.join("correction.json").exists());
     }
 
     #[test]

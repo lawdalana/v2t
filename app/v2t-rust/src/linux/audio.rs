@@ -8,13 +8,13 @@ use std::{
     time::Duration,
 };
 
-pub(super) const BYTES_PER_SECOND: usize = 32_000;
-pub(super) const HEADER: usize = 44;
+pub(super) use crate::speech_gate::{BYTES_PER_SECOND, HEADER};
+use crate::speech_gate::{Chunker, PCM_FORMAT, encode_wave};
+
 pub(super) const MAX_SECONDS: u16 = 300;
 const MAX_PCM_BYTES: usize = MAX_SECONDS as usize * BYTES_PER_SECOND;
 const MAX_WAVE_BYTES: u64 = 25_000_000;
 
-const PCM_FORMAT: &[u8] = b"\x01\x00\x01\x00\x80\x3e\x00\x00\x00\x7d\x00\x00\x02\x00\x10\x00";
 const EXTENSIBLE_PCM: &[u8] = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71";
 
 pub(super) fn read_wave(path: &Path) -> io::Result<Vec<u8>> {
@@ -31,7 +31,10 @@ pub(super) fn read_wave(path: &Path) -> io::Result<Vec<u8>> {
     normalize(&data)
 }
 
-pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
+pub(super) fn record(
+    seconds: u16,
+    submit: impl FnMut(Vec<u8>) -> io::Result<()> + Send,
+) -> io::Result<()> {
     if !(1..=MAX_SECONDS).contains(&seconds) {
         return Err(invalid("Recording duration must be from 1 to 300 seconds."));
     }
@@ -52,36 +55,63 @@ pub(super) fn record(seconds: u16) -> io::Result<Vec<u8>> {
         io::ErrorKind::NotFound => io::Error::new(io::ErrorKind::NotFound, RECORDER_REQUIRED),
         _ => io::Error::other("Could not start the microphone recorder."),
     })?);
-    let mut stream = capture
+    let stream = capture
         .0
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("Could not open the microphone stream."))?;
     let bytes = usize::from(seconds) * BYTES_PER_SECOND;
-    let (send, receive) = mpsc::sync_channel(1);
-    let reader = thread::Builder::new()
-        .name("v2t-microphone".into())
-        .spawn(move || {
-            let mut samples = vec![0; bytes];
-            let result = stream.read_exact(&mut samples).map(|()| samples);
-            let _ = send.send(result);
-        })?;
-    let result = receive.recv_timeout(Duration::from_secs(u64::from(seconds) + 5));
-    drop(capture);
-    reader
-        .join()
-        .map_err(|_| io::Error::other("The microphone reader stopped unexpectedly."))?;
-    match result {
-        Ok(Ok(samples)) => Ok(encode(&samples)),
-        Ok(Err(_)) => Err(io::Error::other(RECORDER_FAILED)),
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Microphone recording timed out.",
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-            "The microphone reader stopped unexpectedly.",
-        )),
+    thread::scope(move |scope| {
+        let (send, receive) = mpsc::sync_channel(1);
+        let reader = thread::Builder::new()
+            .name("v2t-microphone".into())
+            .spawn_scoped(scope, move || {
+                let _ = send.send(read_chunks(stream, bytes, submit));
+            })?;
+        let result = receive.recv_timeout(Duration::from_secs(u64::from(seconds) + 5));
+        drop(capture);
+        reader
+            .join()
+            .map_err(|_| io::Error::other("The microphone reader stopped unexpectedly."))?;
+        match result {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Microphone recording timed out.",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
+                "The microphone reader stopped unexpectedly.",
+            )),
+        }
+    })
+}
+
+fn read_chunks(
+    mut stream: impl Read,
+    mut remaining: usize,
+    mut submit: impl FnMut(Vec<u8>) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut chunker = Chunker::default();
+    let mut samples = [0; BYTES_PER_SECOND / 50];
+    while remaining > 0 {
+        let count = remaining.min(samples.len());
+        let frame = &mut samples[..count];
+        stream
+            .read_exact(frame)
+            .map_err(|_| io::Error::other(RECORDER_FAILED))?;
+        remaining -= count;
+        let mut submitted = Ok(());
+        chunker.push(frame, |wave| {
+            if submitted.is_ok() {
+                submitted = submit(wave);
+            }
+        });
+        submitted?;
     }
+    if let Some(wave) = chunker.finish() {
+        submit(wave)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -194,7 +224,7 @@ fn normalize(input: &[u8]) -> io::Result<Vec<u8>> {
         chunks = next;
     }
     match (found_format, samples) {
-        (true, Some(samples)) => Ok(encode(samples)),
+        (true, Some(samples)) => Ok(encode_wave(samples)),
         _ => Err(invalid("The WAV is missing its format or audio data.")),
     }
 }
@@ -209,19 +239,6 @@ fn pcm_format(format: &[u8]) -> bool {
             && &format[24..40] == EXTENSIBLE_PCM)
 }
 
-fn encode(samples: &[u8]) -> Vec<u8> {
-    let bytes = samples.len() as u32;
-    let mut wave = Vec::with_capacity(samples.len() + HEADER);
-    wave.extend_from_slice(b"RIFF");
-    wave.extend_from_slice(&(bytes + 36).to_le_bytes());
-    wave.extend_from_slice(b"WAVEfmt \x10\x00\x00\x00");
-    wave.extend_from_slice(PCM_FORMAT);
-    wave.extend_from_slice(b"data");
-    wave.extend_from_slice(&bytes.to_le_bytes());
-    wave.extend_from_slice(samples);
-    wave
-}
-
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -233,6 +250,45 @@ fn truncated() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, io::Cursor};
+
+    #[test]
+    fn submits_a_complete_chunk_while_more_microphone_audio_remains() {
+        let mut audio = [500i16, -500]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .cycle()
+            .take(BYTES_PER_SECOND)
+            .collect::<Vec<_>>();
+        audio.resize(3 * BYTES_PER_SECOND, 0);
+        let submitted = Cell::new(false);
+        struct Microphone<'a> {
+            input: Cursor<Vec<u8>>,
+            submitted: &'a Cell<bool>,
+        }
+        impl Read for Microphone<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.input.position() >= 2 * BYTES_PER_SECOND as u64 && !self.submitted.get() {
+                    return Err(io::Error::other(
+                        "Speech was not submitted before the next read.",
+                    ));
+                }
+                self.input.read(buf)
+            }
+        }
+        let mut microphone = Microphone {
+            input: Cursor::new(audio),
+            submitted: &submitted,
+        };
+        read_chunks(&mut microphone, 3 * BYTES_PER_SECOND, |chunk| {
+            assert!(crate::speech_gate::has_speech(&chunk));
+            assert!(!submitted.replace(true));
+            Ok(())
+        })
+        .unwrap();
+        assert!(submitted.get());
+        assert_eq!(microphone.input.position(), 3 * BYTES_PER_SECOND as u64);
+    }
 
     fn fixture() -> Vec<u8> {
         Vec::from(*b"RIFF\x2a\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80\x3e\x00\x00\x00\x7d\x00\x00\x02\x00\x10\x00data\x06\x00\x00\x00\xab\x00\xab\x00\xab\x00")

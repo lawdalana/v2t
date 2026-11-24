@@ -1,5 +1,5 @@
 use crate::{
-    app::{self, Command, Dictation, Notice, Preferences},
+    app::{self, Command, Dictation, Notice, Preferences, Transcript},
     capture::{self, Recorder},
     config,
     dialog::{self, Form, wide},
@@ -18,7 +18,11 @@ use std::{
     path::PathBuf,
     ptr::null_mut,
     rc::Rc,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -48,11 +52,13 @@ enum Event {
         id: u64,
         result: Result<Recorder, &'static str>,
     },
+    CaptureSegment {
+        id: u64,
+        audio: Vec<u8>,
+    },
     CaptureStopped {
-        target: FocusTarget,
-        time: Instant,
-        canceled: bool,
-        audio: io::Result<Vec<u8>>,
+        id: u64,
+        result: io::Result<()>,
     },
     RecordingUnavailable(&'static str),
     Engine(Notice),
@@ -139,7 +145,6 @@ pub fn run() -> io::Result<()> {
         preferences,
         recording: None,
         next_capture_id: 0,
-        transcribing: false,
         installing: false,
         warming: 0,
         retry_initial_warmup: true,
@@ -219,6 +224,14 @@ struct Recording {
     id: u64,
     target: FocusTarget,
     recorder: Option<Recorder>,
+    released: Option<Instant>,
+    canceled: Arc<AtomicBool>,
+    reason: Option<Reason>,
+    stopped: bool,
+    submitted: bool,
+    pending: usize,
+    transcript: Transcript,
+    error: Option<String>,
 }
 
 struct Desktop {
@@ -235,7 +248,6 @@ struct Desktop {
     preferences: Preferences,
     recording: Option<Recording>,
     next_capture_id: u64,
-    transcribing: bool,
     installing: bool,
     warming: usize,
     retry_initial_warmup: bool,
@@ -254,12 +266,8 @@ impl Desktop {
             Event::Start(target) => self.start(target),
             Event::Release { canceled, time } => self.release(canceled, time),
             Event::CaptureReady { id, result } => self.capture_ready(id, result),
-            Event::CaptureStopped {
-                target,
-                time,
-                canceled,
-                audio,
-            } => self.capture_stopped(target, time, canceled, audio),
+            Event::CaptureSegment { id, audio } => self.capture_segment(id, audio),
+            Event::CaptureStopped { id, result } => self.capture_stopped(id, result),
             Event::RecordingUnavailable(message) => self.status(message, true),
             Event::Engine(notice) => self.notice(notice),
             Event::Action(command) => self.action(command),
@@ -291,7 +299,7 @@ impl Desktop {
     }
 
     fn start(&mut self, target: FocusTarget) {
-        if self.recording.is_some() || self.transcribing {
+        if self.recording.is_some() {
             return;
         }
         self.next_capture_id = self.next_capture_id.wrapping_add(1);
@@ -300,6 +308,14 @@ impl Desktop {
             id,
             target,
             recorder: None,
+            released: None,
+            canceled: Arc::new(AtomicBool::new(false)),
+            reason: None,
+            stopped: false,
+            submitted: false,
+            pending: 0,
+            transcript: Transcript::default(),
+            error: None,
         });
         let events = self.events.clone();
         let window = self.form.window as usize;
@@ -314,9 +330,11 @@ impl Desktop {
                             .map_err(|_| io::Error::other("Previous listening cue failed."))?;
                         capture::play_cue()
                     });
-                    let recorder = Recorder::prepare().map_err(
-                        |_| "Could not open the microphone. Check the Windows input device.",
-                    );
+                    let segments = events.clone();
+                    let recorder = Recorder::prepare(move |audio| {
+                        enqueue(&segments, window, Event::CaptureSegment { id, audio });
+                    })
+                    .map_err(|_| "Could not open the microphone. Check the Windows input device.");
                     if !matches!(tone.join(), Ok(Ok(()))) {
                         return Err(
                             "Could not play the listening cue. Check the audio output device.",
@@ -376,90 +394,171 @@ impl Desktop {
     }
 
     fn release(&mut self, canceled: bool, time: Instant) {
-        let Some(recording) = self.recording.take() else {
+        let Some(recording) = self.recording.as_mut().filter(|r| r.released.is_none()) else {
             return;
         };
-        let Some(recorder) = recording.recorder else {
+        let Some(recorder) = recording.recorder.take() else {
+            self.recording.take();
             self.accepts.set(true);
             self.ready();
             return;
         };
-        let target = recording.target;
+        recording.released = Some(time);
+        recording.canceled.store(canceled, Ordering::Release);
+        let id = recording.id;
         let events = self.events.clone();
         let window = self.form.window as usize;
-        self.transcribing = true;
-        if thread::Builder::new()
+        let stopping = thread::Builder::new()
             .name("v2t-finish-capture".into())
             .spawn(move || {
-                enqueue(
-                    &events,
-                    window,
-                    Event::CaptureStopped {
-                        target,
-                        time,
-                        canceled,
-                        audio: recorder.stop(),
-                    },
-                );
-            })
-            .is_err()
-        {
-            self.transcribing = false;
-            self.accepts.set(true);
-            self.status("Could not finish microphone capture.", true);
+                let result = recorder.stop();
+                enqueue(&events, window, Event::CaptureStopped { id, result });
+            });
+        if let Err(error) = stopping {
+            enqueue(
+                &self.events,
+                window,
+                Event::CaptureStopped {
+                    id,
+                    result: Err(error),
+                },
+            );
+        } else if !canceled && recording.pending > 0 {
+            self.status("Transcribing…", false);
         }
     }
 
-    fn capture_stopped(
-        &mut self,
-        target: FocusTarget,
-        time: Instant,
-        canceled: bool,
-        audio: io::Result<Vec<u8>>,
-    ) {
-        self.transcribing = false;
-        let audio = match audio {
-            Ok(audio) if !canceled => audio,
-            Ok(_) => {
-                self.accepts.set(true);
-                self.ready();
-                return;
-            }
-            Err(_) => {
-                self.accepts.set(true);
-                self.status("Could not finish microphone capture.", true);
-                return;
-            }
-        };
-        if !app::usable_audio(&audio) {
-            self.accepts.set(true);
-            self.status(
-                &format!(
-                    "Ready. Hold {} while speaking.",
-                    self.preferences.settings.shortcut.label()
-                ),
-                false,
-            );
+    fn capture_segment(&mut self, id: u64, audio: Vec<u8>) {
+        let Some(recording) = self
+            .recording
+            .as_ref()
+            .filter(|recording| recording.id == id && !recording.canceled.load(Ordering::Acquire))
+        else {
             return;
-        }
-        let reason = self.resource_reason(input::capture_focus().window, self.warming == 0);
+        };
+        // Make one routing decision per recording so GPU work from an earlier
+        // segment cannot route the rest of the recording to the cloud.
+        let reason = recording.reason.unwrap_or_else(|| {
+            self.resource_reason(input::capture_focus().window, self.warming == 0)
+        });
         if self.preferences.settings.provider == SpeechProvider::Local && reason == Reason::None {
             self.retry_initial_warmup = false;
         }
+        let Some(recording) = self.recording.as_mut() else {
+            return;
+        };
+        recording.reason = Some(reason);
         let command = Command::Dictate(Box::new(Dictation {
+            id,
+            canceled: Arc::clone(&recording.canceled),
             preferences: self.preferences.clone(),
             audio,
-            target,
             reason,
-            released: time,
         }));
         if self.commands.send(command).is_err() {
-            self.accepts.set(true);
-            self.status("The speech worker is unavailable. Restart v2t.", true);
+            recording
+                .error
+                .get_or_insert_with(|| "The speech worker is unavailable. Restart v2t.".into());
+        } else {
+            recording.submitted = true;
+            recording.pending += 1;
+            if recording.released.is_some() {
+                self.status("Transcribing…", false);
+            }
+        }
+    }
+
+    fn capture_stopped(&mut self, id: u64, result: io::Result<()>) {
+        let Some(recording) = self.recording.as_mut().filter(|r| r.id == id) else {
+            return;
+        };
+        recording.stopped = true;
+        if result.is_err() {
+            recording
+                .error
+                .get_or_insert_with(|| "Could not finish microphone capture.".into());
+        }
+        self.finish_dictation();
+    }
+
+    fn segment_finished(&mut self, id: u64, result: Result<Transcript, String>) {
+        let Some(recording) = self.recording.as_mut().filter(|r| r.id == id) else {
+            return;
+        };
+        recording.pending -= 1;
+        match result {
+            Ok(segment) => recording.transcript.append(segment),
+            Err(error) => {
+                recording.error.get_or_insert(error);
+            }
+        }
+        self.finish_dictation();
+    }
+
+    fn finish_dictation(&mut self) {
+        if self
+            .recording
+            .as_ref()
+            .is_none_or(|r| !r.stopped || (r.pending > 0 && !r.canceled.load(Ordering::Acquire)))
+        {
             return;
         }
-        self.transcribing = true;
-        self.status("Transcribing…", false);
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        self.accepts.set(true);
+        if recording.canceled.load(Ordering::Acquire) {
+            self.ready();
+            return;
+        }
+
+        let result = recording.transcript;
+        if result.text.is_empty() {
+            if let Some(error) = recording.error {
+                self.status(&error, true);
+            } else if recording.submitted {
+                self.status(
+                    "No speech recognized. Hold the shortcut to try again.",
+                    false,
+                );
+            } else {
+                self.ready();
+            }
+            return;
+        }
+        let inserted = input::try_insert(recording.target, &result.text);
+        self.last_text = Some(result.text);
+        if let Some(error) = recording.error {
+            let status = if inserted {
+                "Typed partial transcript."
+            } else {
+                "Use Copy last transcript in the v2t tray for the partial transcript."
+            };
+            self.status(&format!("{status} {error}"), true);
+        } else if inserted {
+            let verb = if result.backup {
+                "MAI backup typed"
+            } else {
+                "Typed"
+            };
+            let suffix = if result.correction_fallback {
+                " Used dictionary result."
+            } else {
+                ""
+            };
+            let elapsed = recording
+                .released
+                .map_or(Duration::ZERO, |time| time.elapsed());
+            self.status(
+                &format!("{verb} in {:.2} s.{suffix}", elapsed.as_secs_f64()),
+                false,
+            );
+        } else {
+            self.status(
+                "Text is ready. Use Copy last transcript in the v2t tray.",
+                true,
+            );
+        }
     }
 
     fn notice(&mut self, notice: Notice) {
@@ -467,6 +566,15 @@ impl Desktop {
             Notice::Status(status) => {
                 if self.recording.is_none() {
                     self.status(&status, false);
+                }
+            }
+            Notice::Unavailable(error) => {
+                if let Some(recording) = &mut self.recording {
+                    recording.pending = 0;
+                    recording.error.get_or_insert(error);
+                    self.finish_dictation();
+                } else {
+                    self.status(&error, true);
                 }
             }
             Notice::Models {
@@ -489,52 +597,14 @@ impl Desktop {
                     Ok(()) => {
                         let allow = self.resource_reason_now();
                         self.warm(allow);
-                        if !self.transcribing && self.recording.is_none() {
+                        if self.recording.is_none() {
                             self.status("Model installed.", false);
                         }
                     }
                     Err(message) => self.status(&message, true),
                 }
             }
-            Notice::Finished { target, result } => {
-                self.transcribing = false;
-                self.accepts.set(true);
-                match result {
-                    Ok(result) if result.text.is_empty() => self.status(
-                        "No speech recognized. Hold the shortcut to try again.",
-                        false,
-                    ),
-                    Ok(result) => {
-                        let inserted = input::try_insert(target, &result.text);
-                        self.last_text = Some(result.text);
-                        if inserted {
-                            let verb = if result.backup {
-                                "MAI backup typed"
-                            } else {
-                                "Typed"
-                            };
-                            let suffix = if result.correction_fallback {
-                                " Used dictionary result."
-                            } else {
-                                ""
-                            };
-                            self.status(
-                                &format!(
-                                    "{verb} in {:.2} s.{suffix}",
-                                    result.elapsed.as_secs_f64()
-                                ),
-                                false,
-                            );
-                        } else {
-                            self.status(
-                                "Text is ready. Use Copy last transcript in the v2t tray.",
-                                true,
-                            );
-                        }
-                    }
-                    Err(error) => self.status(&error, true),
-                }
-            }
+            Notice::SegmentFinished { id, result } => self.segment_finished(id, result),
         }
     }
 
@@ -597,7 +667,7 @@ impl Desktop {
     }
 
     fn apply(&mut self) -> io::Result<()> {
-        if self.recording.is_some() || self.transcribing || self.installing {
+        if self.recording.is_some() || self.installing {
             return Err(config::invalid(
                 "Finish the current operation before saving settings.",
             ));
@@ -617,7 +687,7 @@ impl Desktop {
     }
 
     fn save_dictionary(&mut self) -> io::Result<()> {
-        if self.recording.is_some() || self.transcribing || self.installing {
+        if self.recording.is_some() || self.installing {
             return Err(config::invalid(
                 "Finish the current operation before saving the dictionary.",
             ));
@@ -636,7 +706,7 @@ impl Desktop {
     }
 
     fn install(&mut self, correction: bool) -> io::Result<()> {
-        if self.recording.is_some() || self.transcribing || self.installing {
+        if self.recording.is_some() || self.installing {
             return Err(config::invalid(
                 "Finish the current operation before installing a model.",
             ));
@@ -672,11 +742,7 @@ impl Desktop {
             self.last_maintenance = Instant::now();
             let _ = self.commands.send(Command::Maintenance);
         }
-        if self.recording.is_some()
-            || self.transcribing
-            || self.installing
-            || !self.preferences.can_backup()
-        {
+        if self.recording.is_some() || self.installing || !self.preferences.can_backup() {
             return;
         }
         let before = self.routing.current;

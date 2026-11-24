@@ -1,18 +1,20 @@
 use crate::{
     config::Settings,
     inference::{Inference, InferenceError, MAI_MODEL, SpeechProvider, SpeechResult},
-    input::FocusTarget,
     models::{CORRECTION_MODEL_FILE, LocalModels},
     resource::Reason,
-    speech_gate, text,
+    speech_gate::{BYTES_PER_SECOND, HEADER},
+    text,
     text::Corrections,
     usage::{Entry, Log, local_now},
 };
 use std::{
     io,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -82,15 +84,16 @@ pub enum Command {
 }
 
 pub struct Dictation {
+    pub id: u64,
+    pub canceled: Arc<AtomicBool>,
     pub preferences: Preferences,
     pub audio: Vec<u8>,
-    pub target: FocusTarget,
     pub reason: Reason,
-    pub released: Instant,
 }
 
 pub enum Notice {
     Status(String),
+    Unavailable(String),
     Models {
         speech: bool,
         preferred: bool,
@@ -98,17 +101,25 @@ pub enum Notice {
     },
     Warmed,
     Installed(Result<(), String>),
-    Finished {
-        target: FocusTarget,
+    SegmentFinished {
+        id: u64,
         result: Result<Transcript, String>,
     },
 }
 
+#[derive(Default)]
 pub struct Transcript {
     pub text: String,
     pub backup: bool,
     pub correction_fallback: bool,
-    pub elapsed: Duration,
+}
+
+impl Transcript {
+    pub fn append(&mut self, segment: Self) {
+        text::append_transcript(&mut self.text, &segment.text);
+        self.backup |= segment.backup;
+        self.correction_fallback |= segment.correction_fallback;
+    }
 }
 
 pub fn spawn(
@@ -120,17 +131,22 @@ pub fn spawn(
     thread::Builder::new()
         .name("v2t-models".into())
         .spawn(move || {
-            let mut worker = match Worker::new(dir, &*notify) {
-                Ok(worker) => worker,
-                Err(error) => {
-                    notify(Notice::Status(error.to_string()));
-                    return;
+            // A stopped worker must release any recording waiting for queued segments.
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let mut worker = Worker::new(dir, &*notify)?;
+                worker.cleanup();
+                while let Ok(command) = receive.recv() {
+                    worker.handle(command);
                 }
+                Ok::<_, InferenceError>(())
+            }));
+            let error = match outcome {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => "The speech worker stopped unexpectedly. Restart v2t.".into(),
             };
-            worker.cleanup();
-            while let Ok(command) = receive.recv() {
-                worker.handle(command);
-            }
+            drop(receive);
+            notify(Notice::Unavailable(error));
         })?;
     Ok(send)
 }
@@ -182,9 +198,15 @@ impl<'a> Worker<'a> {
             Command::Suspend => self.models.suspend(),
             Command::Maintenance => self.cleanup(),
             Command::Dictate(dictation) => {
-                let target = dictation.target;
-                let result = self.transcribe(*dictation);
-                (self.notify)(Notice::Finished { target, result });
+                if !dictation.canceled.load(Ordering::Acquire) {
+                    let result = self.transcribe(&dictation);
+                    if !dictation.canceled.load(Ordering::Acquire) {
+                        (self.notify)(Notice::SegmentFinished {
+                            id: dictation.id,
+                            result,
+                        });
+                    }
+                }
             }
         }
     }
@@ -258,14 +280,13 @@ impl<'a> Worker<'a> {
         (self.notify)(Notice::Warmed);
     }
 
-    fn transcribe(&mut self, dictation: Dictation) -> Result<Transcript, String> {
+    fn transcribe(&mut self, dictation: &Dictation) -> Result<Transcript, String> {
         let audio = &dictation.audio;
         let preferences = &dictation.preferences;
         let provider = preferences.settings.provider;
-        let audio_seconds = audio.len().saturating_sub(44) as f64 / 32_000.0;
+        let audio_seconds = audio.len().saturating_sub(HEADER) as f64 / BYTES_PER_SECOND as f64;
         let language = preferences.settings.language.as_deref();
         let mut used_backup = false;
-        self.status("Transcribing…");
 
         let speech = if provider != SpeechProvider::Local {
             let key = preferences
@@ -300,7 +321,10 @@ impl<'a> Worker<'a> {
                 .loaded_speech()
                 .map_or("Local Whisper", |model| model.file);
             self.record_speech(start, provider, model, audio_seconds, &local);
-            if local.as_ref().is_err_and(InferenceError::can_fallback) && preferences.can_backup() {
+            if local.as_ref().is_err_and(InferenceError::can_fallback)
+                && preferences.can_backup()
+                && !dictation.canceled.load(Ordering::Acquire)
+            {
                 used_backup = true;
                 self.backup(audio, preferences, audio_seconds, Reason::None)
             } else {
@@ -315,9 +339,9 @@ impl<'a> Worker<'a> {
         if !text.is_empty()
             && dictation.reason == Reason::None
             && preferences.corrections.enable_ai
+            && !dictation.canceled.load(Ordering::Acquire)
             && self.models.correction_available()
         {
-            self.status("Correcting text with local AI…");
             let start = Measurement::new();
             let corrected = self
                 .models
@@ -350,7 +374,6 @@ impl<'a> Worker<'a> {
             text,
             backup: used_backup,
             correction_fallback,
-            elapsed: dictation.released.elapsed(),
         })
     }
 
@@ -457,8 +480,4 @@ impl Measurement {
             time: Instant::now(),
         }
     }
-}
-
-pub fn usable_audio(audio: &[u8]) -> bool {
-    audio.len() >= 4800 && speech_gate::has_speech(audio)
 }

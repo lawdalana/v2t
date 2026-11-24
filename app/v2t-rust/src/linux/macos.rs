@@ -35,14 +35,14 @@ use objc2_foundation::{
 use super::{
     SpeechOptions, Storage,
     clipboard::{CopyOutcome, copy_transcript},
-    pipeline,
+    pipeline::{self, RecordingResult},
 };
 use crate::models::LocalModels;
 use dictionary::DictionaryEditor;
 use hotkey::{Edge, Hotkey, Registration};
 use modifiers::ModifierShortcut;
 use preferences::{Preferences, Shortcut};
-use recording::Recording;
+use recording::{PendingTranscript, Recording};
 use window::MainWindow;
 
 const READY: &str = "Ready to record";
@@ -83,6 +83,7 @@ enum State {
     Idle,
     RequestingPermission(RecordOrigin, mpsc::Receiver<Update>),
     Recording(RecordOrigin, Recording),
+    Transcribing(PendingTranscript),
     Working(mpsc::Receiver<Update>),
 }
 
@@ -108,7 +109,7 @@ fn shortcut_action(state: &State, edge: Edge) -> Option<ShortcutAction> {
 
 enum Update {
     Microphone(bool),
-    Transcript(Result<Option<String>, String>),
+    Transcript(RecordingResult),
     Model(Result<(), String>),
 }
 
@@ -198,7 +199,7 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminate:))]
         fn applicationShouldTerminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            if matches!(*self.ivars().state.borrow(), State::Working(_)) {
+            if matches!(*self.ivars().state.borrow(), State::Transcribing(_) | State::Working(_)) {
                 return NSApplicationTerminateReply::TerminateCancel;
             }
             self.set_state(State::Idle, READY);
@@ -297,6 +298,7 @@ define_class!(
         fn poll_updates(&self, _timer: &NSTimer) {
             let update = match &*self.ivars().state.borrow() {
                 State::RequestingPermission(_, receiver) | State::Working(receiver) => receiver.try_recv(),
+                State::Transcribing(receiver) => receiver.try_recv().map(Update::Transcript),
                 _ => Err(mpsc::TryRecvError::Empty),
             };
             match update {
@@ -503,7 +505,12 @@ impl Controller {
     }
 
     fn start_recording(&self, origin: RecordOrigin) {
-        match Recording::start() {
+        let options = self.ivars().preferences.get().speech();
+        let result = Storage::resolve().and_then(|storage| {
+            let (speech, transcript) = pipeline::start_recording(storage, options)?;
+            Ok(Recording::start(speech, transcript)?)
+        });
+        match result {
             Ok(recording) => self.set_state(State::Recording(origin, recording), "Recording…"),
             Err(error) => self.set_state(State::Idle, &error.to_string()),
         }
@@ -513,15 +520,7 @@ impl Controller {
         let State::Recording(_, recording) = self.ivars().state.replace(State::Idle) else {
             return;
         };
-        let options = self.ivars().preferences.get().speech();
-        match recording.finish() {
-            Ok(wave) => self.start_task("Transcribing…", move || {
-                let result = Storage::resolve()
-                    .and_then(|storage| pipeline::transcribe(&storage, &options, &wave));
-                Update::Transcript(result.map_err(|error| error.to_string()))
-            }),
-            Err(error) => self.set_state(State::Idle, &error.to_string()),
-        }
+        self.set_state(State::Transcribing(recording.finish()), "Transcribing…");
     }
 
     fn start_task(&self, status: &str, work: impl FnOnce() -> Update + Send + 'static) {
@@ -555,13 +554,22 @@ impl Controller {
             }
             Update::Microphone(false) => MIC_SETTINGS,
             Update::Model(Ok(())) => "Speech model ready",
-            Update::Transcript(Ok(text)) => copy_status(copy_transcript(text.as_deref(), |text| {
-                self.ivars().window.set_transcript(text);
-                self.ivars().menu.copy_last.setEnabled(true);
-                let copied = write_clipboard(text);
-                self.play_completion_sound();
-                copied
-            })),
+            Update::Transcript(Ok(transcript)) => {
+                let status = copy_status(copy_transcript(transcript.text.as_deref(), |text| {
+                    self.ivars().window.set_transcript(text);
+                    self.ivars().menu.copy_last.setEnabled(true);
+                    let copied = write_clipboard(text);
+                    self.play_completion_sound();
+                    copied
+                }));
+                if let Some(error) = transcript.partial_failure {
+                    return self.set_state(
+                        State::Idle,
+                        &format!("{status}. Dictation may be incomplete. {error}"),
+                    );
+                }
+                status
+            }
             Update::Model(Err(error)) | Update::Transcript(Err(error)) => {
                 return self.set_state(State::Idle, &error);
             }
@@ -583,7 +591,7 @@ impl Controller {
     fn set_state(&self, state: State, status: &str) {
         let idle = matches!(state, State::Idle);
         let recording = matches!(state, State::Recording(_, _));
-        let working = matches!(state, State::Working(_));
+        let working = matches!(state, State::Transcribing(_) | State::Working(_));
         let menu = &self.ivars().menu;
         let status = NSString::from_str(status);
         let record_title = NSString::from_str(if recording {
@@ -603,7 +611,7 @@ impl Controller {
         if let Some(button) = menu.bar_item.button(self.mtm()) {
             let title = match &state {
                 State::Recording(_, _) => "v2t ●",
-                State::Working(_) => "v2t …",
+                State::Transcribing(_) | State::Working(_) => "v2t …",
                 _ => "v2t",
             };
             button.setTitle(&NSString::from_str(title));

@@ -228,9 +228,31 @@ pub fn for_insertion(input: &str) -> String {
     output
 }
 
+pub fn append_transcript(output: &mut String, transcript: &str) {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return;
+    }
+    if !output.is_empty()
+        && !transcript.starts_with([',', '.', '!', '?', ':', ';', ')', ']', '}', '…'])
+    {
+        output.push(' ');
+    }
+    output.push_str(transcript);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_segments_in_order_with_phrase_spacing() {
+        let mut output = String::new();
+        for segment in ["  สวัสดี ", "", "OpenRouter", "!", "พูดต่อ"] {
+            append_transcript(&mut output, segment);
+        }
+        assert_eq!(output, "สวัสดี OpenRouter! พูดต่อ");
+    }
 
     #[test]
     fn preserves_thai_and_english_boundaries_and_applies_longer_terms_first() {

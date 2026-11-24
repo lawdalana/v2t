@@ -263,12 +263,24 @@ fn execute(action: Action) -> Result<()> {
             }
         }
         Action::Record { seconds, options } => {
-            pipeline::validate_credentials(&options)?;
             let storage = Storage::resolve()?;
+            let (speech, transcript) = pipeline::start_recording(storage, options)?;
             eprintln!("Recording for {seconds} seconds…");
-            let wave = audio::record(seconds)?;
-            if let Some(text) = pipeline::transcribe(&storage, &options, &wave)? {
-                output(&text)?;
+            if let Err(error) = audio::record(seconds, |wave| speech.send(wave)) {
+                drop(speech);
+                let _ = transcript.recv();
+                return Err(error.into());
+            }
+            speech.finish();
+            let transcript = transcript
+                .recv()
+                .map_err(|_| "The speech worker stopped unexpectedly.")??;
+            if let Some(error) = transcript.partial_failure {
+                eprintln!("Could not transcribe part of the recording. {error}");
+            }
+            match transcript.text {
+                Some(text) => output(&text)?,
+                None => eprintln!("No speech recognized."),
             }
         }
     }

@@ -10,13 +10,17 @@ Windows 10 and 11 use the tray app. Hold your dictation shortcut and wait for th
 2. Select **Local**, **OpenAI**, or **OpenRouter**, then click **Save settings**. For Local, install the model in Settings if needed. For a cloud provider, enter its API key before saving.
 3. Place the cursor in a text field and hold **Ctrl+Shift** to dictate. Enter a different combination in **Hold to dictate**, for example `Ctrl+F9`, and save to change it. Pressing an extra key during dictation cancels the recording. If the target changes, recover the result with **Copy last transcript** from the tray menu.
 
-**Local** uses Typhoon Whisper Turbo Q5 for Thai and mixed Thai–English. English and all-language detection use Whisper Large V3 Turbo Q5. Model setup downloads about 547 MiB per model, and an existing stock Whisper model can handle Thai while Typhoon is being installed. Once installed, Local transcribes offline. The OpenAI option uses `gpt-transcribe`, and OpenRouter uses `openai/whisper-large-v3-turbo`. Cloud modes send the current recording to the selected provider. Settings encrypt each saved key for the current Windows account.
+**Local** uses Typhoon Whisper Turbo Q5 for Thai and mixed Thai–English. English and all-language detection use Whisper Large V3 Turbo Q5. Model setup downloads about 547 MiB per model, and an existing stock Whisper model can handle Thai while Typhoon is being installed. Once installed, Local transcribes offline. The OpenAI option uses `gpt-transcribe`, and OpenRouter uses `openai/whisper-large-v3-turbo`. Cloud modes send speech segments to the selected provider during recording. Settings encrypt each saved key for the current Windows account.
 
 Choose **Thai + English (mixed)** to dictate both languages in one sentence. Local accepts results labeled Thai or English. OpenAI receives both languages as hints. OpenRouter Whisper uses its automatic detection. **Detect automatically (all languages)**, **Thai**, and **English** are also available.
 
+### Transcription while recording
+
+v2t starts processing each speech segment after about one second of silence and keeps listening. Once a segment reaches 10 seconds, a half-second pause is enough. Continuous speech is split at 12 seconds. v2t processes any remaining speech when recording ends, then combines the text in the order you spoke it. This applies to Windows and macOS desktop dictation and the `v2t record` command.
+
 ### Local speech backup
 
-With **Local** and **Use MAI-Transcribe-2 when Local is busy or fails** selected, v2t tries local speech recognition first during normal use. If the local model fails or times out, v2t sends that recording once to OpenRouter's MAI-Transcribe-2. v2t skips silence and very quiet background noise before sending audio to any model. Empty local results and recordings rejected by the mixed-language check stay local.
+With **Local** and **Use MAI-Transcribe-2 when Local is busy or fails** selected, v2t tries local speech recognition first during normal use. If local recognition fails or times out on a segment, v2t sends that segment once to OpenRouter's MAI-Transcribe-2. v2t skips silence and very quiet background noise before sending audio to any model. Empty local results and segments rejected by the mixed-language check stay local.
 
 v2t automatically chooses MAI for the next recording when it detects a foreground game, less than 2 GiB of available RAM, less than 1.5 GiB of free NVIDIA VRAM, or GPU utilization of 50% or higher on two consecutive readings. Game detection uses the Windows exclusive Direct3D fullscreen signal and known game library paths. In this mode v2t releases the local speech and correction workers and still applies the Dictionary. v2t preloads installed, enabled local models when it starts. If resource pressure pauses the models before the first local transcription attempt, v2t tries once more in the background after three healthy readings. After that, paused models load on demand. This routing uses the same OpenRouter key and backup checkbox.
 
@@ -63,7 +67,7 @@ open publish/V2t.app
 
 1. In the v2t window, choose your **Dictation language** and **Hold to dictate** shortcut, then click **Save Settings**. Choose **Install Speech Model** if you need the local model for that language.
 2. Hold **Control + Shift + Space** to record. The first time, allow microphone access at the macOS prompt, then hold the shortcut again. Settings also offers **Command + Shift + Space**, **Control + F9**, **Right Command + Right Option (v2t active)**, and **Off**. Use the right-side pair while the v2t window has keyboard focus.
-3. Release the shortcut to transcribe and copy the result. A short sound plays when the transcript is ready. Press **⌘V** in your destination app. You can also use **Start Recording** and **Stop and Copy** in the window.
+3. Release the shortcut to finish recording and copy the result. A short sound plays when the transcript is ready. Press **⌘V** in your destination app. You can also use **Start Recording** and **Stop and Copy** in the window.
 
 Use **Copy** next to **Transcript** or **Copy Last Transcript** in the v2t menu bar menu to copy the latest result again.
 

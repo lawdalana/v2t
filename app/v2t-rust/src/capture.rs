@@ -25,10 +25,9 @@ use windows_sys::Win32::{
     System::Threading::{CreateEventW, SetEvent, WaitForSingleObject},
 };
 
-pub const SAMPLE_RATE: u32 = 16_000;
-pub const PCM_BYTES_PER_SECOND: u32 = SAMPLE_RATE * 2;
-pub const HEADER_BYTES: usize = 44;
-const MAX_PCM_BYTES: usize = PCM_BYTES_PER_SECOND as usize * 5 * 60;
+use crate::speech_gate::{BYTES_PER_SECOND, Chunker, SAMPLE_RATE};
+
+const MAX_PCM_BYTES: usize = BYTES_PER_SECOND * 5 * 60;
 const BUFFER_COUNT: usize = 4;
 const BUFFER_BYTES: usize = 1_600;
 const HEADER_SIZE: u32 = size_of::<WAVEHDR>() as u32;
@@ -67,11 +66,11 @@ pub fn play_cue() -> io::Result<()> {
 pub struct Recorder {
     commands: Option<Sender<Sender<io::Result<()>>>>,
     notification: Arc<Notification>,
-    worker: Option<JoinHandle<io::Result<Vec<u8>>>>,
+    worker: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl Recorder {
-    pub fn prepare() -> io::Result<Self> {
+    pub fn prepare(emit: impl FnMut(Vec<u8>) + Send + 'static) -> io::Result<Self> {
         let notification = Arc::new(Notification::new()?);
         let worker_notification = Arc::clone(&notification);
         let (prepared, result) = sync_channel(1);
@@ -83,21 +82,21 @@ impl Recorder {
                     Ok(device) => device,
                     Err(error) => {
                         let _ = prepared.send(Err(error));
-                        return Ok(Vec::new());
+                        return Ok(());
                     }
                 };
                 if prepared.send(Ok(())).is_err() {
-                    return Ok(Vec::new());
+                    return Ok(());
                 }
                 let Ok(started) = start.recv() else {
-                    return Ok(Vec::new());
+                    return Ok(());
                 };
                 let result = device.start();
                 let running = result.is_ok();
                 if started.send(result).is_err() || !running {
-                    return Ok(Vec::new());
+                    return Ok(());
                 }
-                device.record()
+                device.record(emit)
             })?;
         let recorder = Self {
             commands: Some(commands),
@@ -125,7 +124,7 @@ impl Recorder {
             .map_err(|_| io::Error::other("Could not start the microphone."))?
     }
 
-    pub fn stop(mut self) -> io::Result<Vec<u8>> {
+    pub fn stop(mut self) -> io::Result<()> {
         self.signal_stop();
         self.join()
     }
@@ -136,12 +135,12 @@ impl Recorder {
         self.commands.take();
     }
 
-    fn join(&mut self) -> io::Result<Vec<u8>> {
+    fn join(&mut self) -> io::Result<()> {
         match self.worker.take() {
             Some(worker) => worker
                 .join()
                 .map_err(|_| io::Error::other("Microphone worker stopped unexpectedly."))?,
-            None => Ok(Vec::new()),
+            None => Ok(()),
         }
     }
 }
@@ -238,7 +237,7 @@ impl WaveBuffer {
         }
     }
 
-    fn append_returned(&self, output: &mut PcmWave) -> io::Result<bool> {
+    fn samples(&self) -> io::Result<&[u8]> {
         // SAFETY: the caller only reaches this method after the WIM_DATA notification
         // or a successful waveInReset, which returns ownership of this buffer.
         let size =
@@ -250,8 +249,7 @@ impl WaveBuffer {
         }
         // SAFETY: the zero-initialized allocation is BUFFER_BYTES long and this
         // synchronous borrow ends before WinMM could requeue it.
-        let samples = unsafe { slice::from_raw_parts(self.data.as_ptr().cast::<u8>(), size) };
-        Ok(output.append(samples))
+        Ok(unsafe { slice::from_raw_parts(self.data.as_ptr().cast::<u8>(), size) })
     }
 }
 
@@ -280,7 +278,7 @@ impl WaveInput {
             wFormatTag: 1,
             nChannels: 1,
             nSamplesPerSec: SAMPLE_RATE,
-            nAvgBytesPerSec: PCM_BYTES_PER_SECOND,
+            nAvgBytesPerSec: BYTES_PER_SECOND as u32,
             nBlockAlign: 2,
             wBitsPerSample: 16,
             cbSize: 0,
@@ -343,11 +341,11 @@ impl WaveInput {
         Ok(())
     }
 
-    fn record(&mut self) -> io::Result<Vec<u8>> {
-        let mut pcm = PcmWave::new();
+    fn record(&mut self, mut emit: impl FnMut(Vec<u8>)) -> io::Result<()> {
+        let mut pcm = PcmCapture::new();
         while !self.notification.stopping.load(Ordering::Acquire) {
             self.notification.wait()?;
-            if self.drain(&mut pcm, true)? {
+            if self.drain(&mut pcm, &mut emit, true)? {
                 break;
             }
         }
@@ -355,11 +353,19 @@ impl WaveInput {
         // returns any buffers still owned by the driver, including the partial frame.
         multimedia(unsafe { waveInStop(self.handle) }, "stop")?;
         multimedia(unsafe { waveInReset(self.handle) }, "reset")?;
-        self.drain(&mut pcm, false)?;
-        Ok(pcm.finish())
+        self.drain(&mut pcm, &mut emit, false)?;
+        if let Some(wave) = pcm.chunker.finish() {
+            emit(wave);
+        }
+        Ok(())
     }
 
-    fn drain(&mut self, pcm: &mut PcmWave, requeue: bool) -> io::Result<bool> {
+    fn drain(
+        &mut self,
+        pcm: &mut PcmCapture,
+        emit: &mut impl FnMut(Vec<u8>),
+        requeue: bool,
+    ) -> io::Result<bool> {
         for _ in 0..BUFFER_COUNT {
             let slot = self.next;
             if !self.buffers[slot].queued
@@ -370,7 +376,7 @@ impl WaveInput {
             let buffer = &mut self.buffers[slot];
             buffer.queued = false;
             self.next = (slot + 1) % BUFFER_COUNT;
-            if buffer.append_returned(pcm)? {
+            if pcm.append(buffer.samples()?, &mut *emit) {
                 return Ok(true);
             }
             if requeue && !self.notification.stopping.load(Ordering::Acquire) {
@@ -411,36 +417,24 @@ fn multimedia(status: u32, operation: &str) -> io::Result<()> {
     }
 }
 
-struct PcmWave(Vec<u8>);
+struct PcmCapture {
+    chunker: Chunker,
+    remaining: usize,
+}
 
-impl PcmWave {
+impl PcmCapture {
     fn new() -> Self {
-        Self(vec![0; HEADER_BYTES])
+        Self {
+            chunker: Chunker::default(),
+            remaining: MAX_PCM_BYTES,
+        }
     }
 
-    fn append(&mut self, samples: &[u8]) -> bool {
-        let remaining = HEADER_BYTES + MAX_PCM_BYTES - self.0.len();
-        let count = samples.len().min(remaining) & !1;
-        self.0.extend_from_slice(&samples[..count]);
-        count == remaining
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        let bytes = (self.0.len() - HEADER_BYTES) as u32;
-        let header = &mut self.0[..HEADER_BYTES];
-        header[0..4].copy_from_slice(b"RIFF");
-        header[4..8].copy_from_slice(&(bytes + 36).to_le_bytes());
-        header[8..16].copy_from_slice(b"WAVEfmt ");
-        header[16..20].copy_from_slice(&16u32.to_le_bytes());
-        header[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
-        header[22..24].copy_from_slice(&1u16.to_le_bytes()); // mono
-        header[24..28].copy_from_slice(&SAMPLE_RATE.to_le_bytes());
-        header[28..32].copy_from_slice(&PCM_BYTES_PER_SECOND.to_le_bytes());
-        header[32..34].copy_from_slice(&2u16.to_le_bytes());
-        header[34..36].copy_from_slice(&16u16.to_le_bytes());
-        header[36..40].copy_from_slice(b"data");
-        header[40..44].copy_from_slice(&bytes.to_le_bytes());
-        self.0
+    fn append(&mut self, samples: &[u8], emit: impl FnMut(Vec<u8>)) -> bool {
+        let count = samples.len().min(self.remaining) & !1;
+        self.chunker.push(&samples[..count], emit);
+        self.remaining -= count;
+        self.remaining == 0
     }
 }
 
@@ -449,23 +443,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_the_winforms_pcm_wire_format() {
-        let mut capture = PcmWave::new();
-        capture.append(&[1, 2, 3, 4, 5]);
-        assert_eq!(
-            capture.finish(),
-            b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x04\0\0\0\x01\x02\x03\x04"
-        );
-    }
-
-    #[test]
     fn caps_capture_at_five_minutes_and_trims_partial_samples() {
-        let mut capture = PcmWave::new();
-        assert!(capture.append(&vec![0xa3; MAX_PCM_BYTES + 3]));
-        assert!(capture.append(&[0, 0]));
-        let wav = capture.finish();
-        assert_eq!(wav.len(), HEADER_BYTES + MAX_PCM_BYTES);
-        assert_eq!(&wav[40..44], &(MAX_PCM_BYTES as u32).to_le_bytes());
-        assert_eq!(*wav.last().unwrap(), 0xa3);
+        let mut capture = PcmCapture::new();
+        let mut bytes = 0;
+        let mut emit = |wav: Vec<u8>| bytes += wav.len() - crate::speech_gate::HEADER;
+        let signal = 400i16
+            .to_le_bytes()
+            .into_iter()
+            .chain((-400i16).to_le_bytes())
+            .cycle()
+            .take(MAX_PCM_BYTES + 3)
+            .collect::<Vec<_>>();
+        assert!(capture.append(&signal, &mut emit));
+        assert!(capture.append(&[0, 0], &mut emit));
+        assert!(capture.chunker.finish().is_none());
+        assert_eq!(bytes, 9_600_000);
     }
 }

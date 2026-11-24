@@ -1,6 +1,12 @@
 use std::{
     env, fs, io,
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -60,8 +66,106 @@ fn resolve_credentials(options: &SpeechOptions) -> Result<Credentials> {
     }
 }
 
-pub(super) fn validate_credentials(options: &SpeechOptions) -> Result<()> {
-    resolve_credentials(options).map(|_| ())
+pub(super) type RecordingResult = std::result::Result<RecordingTranscript, String>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct RecordingTranscript {
+    pub text: Option<String>,
+    pub partial_failure: Option<String>,
+}
+
+pub(super) struct RecordingSpeech {
+    sender: mpsc::Sender<Vec<u8>>,
+    canceled: Arc<AtomicBool>,
+    finishing: bool,
+}
+
+impl RecordingSpeech {
+    pub(super) fn send(&self, wave: Vec<u8>) -> io::Result<()> {
+        self.sender
+            .send(wave)
+            .map_err(|_| io::Error::other("The speech worker stopped unexpectedly."))
+    }
+
+    pub(super) fn finish(mut self) {
+        self.finishing = true;
+    }
+}
+
+impl Drop for RecordingSpeech {
+    fn drop(&mut self) {
+        if !self.finishing {
+            self.canceled.store(true, Ordering::Release);
+        }
+    }
+}
+
+pub(super) fn start_recording(
+    storage: Storage,
+    options: SpeechOptions,
+) -> io::Result<(RecordingSpeech, mpsc::Receiver<RecordingResult>)> {
+    let credentials =
+        resolve_credentials(&options).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut session = None;
+    spawn_recording(move |wave| {
+        match session
+            .get_or_insert_with(|| Transcriber::new(&storage).map_err(|error| error.to_string()))
+        {
+            Ok(transcriber) => {
+                transcribe_segment(transcriber, &storage, &options, &credentials, wave)
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.clone()),
+        }
+    })
+}
+
+fn spawn_recording(
+    mut transcribe: impl FnMut(&[u8]) -> std::result::Result<Option<String>, String> + Send + 'static,
+) -> io::Result<(RecordingSpeech, mpsc::Receiver<RecordingResult>)> {
+    let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+    let (result, receiver) = mpsc::sync_channel(1);
+    let canceled = Arc::new(AtomicBool::new(false));
+    let cancellation = canceled.clone();
+    thread::Builder::new()
+        .name("v2t-recording-speech".into())
+        .spawn(move || {
+            let mut transcript = String::new();
+            let mut first_error = None;
+            for wave in chunks {
+                if cancellation.load(Ordering::Acquire) {
+                    break;
+                }
+                match transcribe(&wave) {
+                    Ok(Some(segment)) => text::append_transcript(&mut transcript, &segment),
+                    Ok(None) => (),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            // Closing the model processes comes before notifying a CLI that may exit.
+            drop(transcribe);
+            if !cancellation.load(Ordering::Acquire) {
+                let text = (!transcript.is_empty()).then_some(transcript);
+                let outcome = match (text, first_error) {
+                    (None, Some(error)) => Err(error),
+                    (text, partial_failure) => Ok(RecordingTranscript {
+                        text,
+                        partial_failure,
+                    }),
+                };
+                let _ = result.send(outcome);
+            }
+        })?;
+    Ok((
+        RecordingSpeech {
+            sender,
+            canceled,
+            finishing: false,
+        },
+        receiver,
+    ))
 }
 
 pub(super) fn transcribe(
@@ -74,21 +178,45 @@ pub(super) fn transcribe(
         return Ok(None);
     }
     let credentials = resolve_credentials(options)?;
-    let corrections = Corrections::load(&storage.config)?;
-    let mut models = LocalModels::new(storage.data.clone())?;
-    let mut log = Log::new(storage.data.clone());
-    if with_log_lock(&storage.data, || log.cleanup()).is_err() {
-        eprintln!("Could not clean up the local usage log.");
-    }
+    let mut session = Transcriber::new(storage)?;
+    transcribe_segment(&mut session, storage, options, &credentials, wave)
+}
 
-    let speech = recognize(
-        wave,
-        &mut models,
-        options,
-        &credentials,
-        &storage.data,
-        &log,
-    )?;
+struct Transcriber {
+    corrections: Corrections,
+    models: LocalModels,
+    log: Log,
+}
+
+impl Transcriber {
+    fn new(storage: &Storage) -> Result<Self> {
+        let corrections = Corrections::load(&storage.config)?;
+        let models = LocalModels::new(storage.data.clone())?;
+        let mut log = Log::new(storage.data.clone());
+        if with_log_lock(&storage.data, || log.cleanup()).is_err() {
+            eprintln!("Could not clean up the local usage log.");
+        }
+        Ok(Self {
+            corrections,
+            models,
+            log,
+        })
+    }
+}
+
+fn transcribe_segment(
+    session: &mut Transcriber,
+    storage: &Storage,
+    options: &SpeechOptions,
+    credentials: &Credentials,
+    wave: &[u8],
+) -> Result<Option<String>> {
+    let Transcriber {
+        corrections,
+        models,
+        log,
+    } = session;
+    let speech = recognize(wave, models, options, credentials, &storage.data, log)?;
     let (mapped, protected) = corrections.apply(&text::for_insertion(&speech.text));
     if mapped.is_empty() {
         eprintln!("No speech was recognized.");
@@ -121,7 +249,7 @@ pub(super) fn transcribe(
     };
     save_entry(
         &storage.data,
-        &log,
+        log,
         Entry {
             started_at: started,
             stage: "correction",
@@ -183,12 +311,18 @@ fn recognize(
         Some(_) => Duration::from_secs_f64((5.0 + seconds / 4.0).min(60.0)),
         None => REQUEST_TIMEOUT,
     };
-    let (model, result) = background::speech(data, wave, options.language, local_budget)
-        .unwrap_or_else(|| {
-            let result = models.speech(wave, options.language, local_budget);
-            let model = models.loaded_speech().map(|model| model.file.to_owned());
-            (model, result)
-        });
+    // The socket worker requires three voiced frames. Capture can also produce
+    // a short voiced continuation immediately after a forced cut.
+    let background_attempt = if speech_gate::has_speech(wave) {
+        background::speech(data, wave, options.language, local_budget)
+    } else {
+        None
+    };
+    let (model, result) = background_attempt.unwrap_or_else(|| {
+        let result = models.speech(wave, options.language, local_budget);
+        let model = models.loaded_speech().map(|model| model.file.to_owned());
+        (model, result)
+    });
     let model = model.as_deref().unwrap_or("Local Whisper");
     attempt.log(data, log, SpeechProvider::Local, model, &result);
     let Some(key) = &credentials.backup else {
@@ -271,4 +405,113 @@ fn with_log_lock(data: &Path, operation: impl FnOnce() -> io::Result<()>) -> io:
         .open(data.join(".usage.lock"))?;
     lock.lock()?;
     operation()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{TryRecvError, channel};
+
+    #[test]
+    fn processes_audio_before_finish_and_collects_successful_chunks_in_order() {
+        let (processed, calls) = channel();
+        let (recording, transcript) = spawn_recording(move |wave| {
+            processed.send(wave[0]).unwrap();
+            match wave[0] {
+                1 => Ok(Some("first".into())),
+                2 => Err("test inference failure".into()),
+                3 => Ok(Some("third".into())),
+                _ => unreachable!(),
+            }
+        })
+        .unwrap();
+
+        recording.send(vec![1]).unwrap();
+        assert_eq!(calls.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+        assert_eq!(transcript.try_recv(), Err(TryRecvError::Empty));
+
+        recording.send(vec![2]).unwrap();
+        recording.send(vec![3]).unwrap();
+        recording.finish();
+        assert_eq!(
+            transcript.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(RecordingTranscript {
+                text: Some("first third".into()),
+                partial_failure: Some("test inference failure".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn cancels_queued_transcription_when_recording_is_dropped() {
+        let (processed, calls) = channel();
+        let (resume, waiting) = channel();
+        let (recording, transcript) = spawn_recording(move |wave| {
+            processed.send(wave[0]).unwrap();
+            if wave[0] == 1 {
+                waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+            Ok(None)
+        })
+        .unwrap();
+
+        recording.send(vec![1]).unwrap();
+        assert_eq!(calls.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+        recording.send(vec![2]).unwrap();
+        drop(recording);
+        resume.send(()).unwrap();
+        assert!(transcript.recv_timeout(Duration::from_secs(2)).is_err());
+        assert_eq!(calls.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn returns_the_error_when_no_chunk_has_a_transcript() {
+        let (recording, transcript) =
+            spawn_recording(|_| Err("test inference failure".into())).unwrap();
+        recording.send(vec![1]).unwrap();
+        recording.finish();
+        assert_eq!(
+            transcript.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err("test inference failure".into())
+        );
+    }
+
+    #[test]
+    fn releases_the_model_process_before_delivering_the_transcript() {
+        struct ModelProcess {
+            stopped: mpsc::Sender<()>,
+            reaped: mpsc::Receiver<()>,
+        }
+        impl Drop for ModelProcess {
+            fn drop(&mut self) {
+                let _ = self.stopped.send(());
+                let _ = self.reaped.recv_timeout(Duration::from_secs(2));
+            }
+        }
+
+        let (stop, stopped) = channel();
+        let (reap, reaped) = channel();
+        let model = ModelProcess {
+            stopped: stop,
+            reaped,
+        };
+        let (recording, transcript) = spawn_recording(move |_| {
+            let _model = &model;
+            Ok(Some("ready".into()))
+        })
+        .unwrap();
+        recording.send(vec![1]).unwrap();
+        recording.finish();
+
+        stopped.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(transcript.try_recv(), Err(TryRecvError::Empty));
+        reap.send(()).unwrap();
+        assert_eq!(
+            transcript.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(RecordingTranscript {
+                text: Some("ready".into()),
+                partial_failure: None,
+            })
+        );
+    }
 }

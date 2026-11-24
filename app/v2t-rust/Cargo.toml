@@ -37,15 +37,20 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSTextView", "NSUserInterfaceItemIdentification", "NSView", "NSWindow", "block2",
     "objc2-core-foundation",
 ] }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std", "AudioQueue", "objc2-core-audio-types", "objc2-core-foundation",
+] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
     "std", "AVCaptureDevice", "AVMediaFormat", "block2",
 ] }
-objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
-    "std", "AVAudioFormat", "AVAudioRecorder", "AVAudioTypes",
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = [
+    "std", "CoreAudioBaseTypes",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std", "NSBundle", "NSRunLoop", "NSTimer", "NSURL",
 ] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 tempfile = "3.27"
 
 [target.'cfg(windows)'.dependencies]

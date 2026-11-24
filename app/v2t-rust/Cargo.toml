@@ -1,6 +1,6 @@
 [package]
 name = "v2t-desktop"
-version = "2.2.1"
+version = "2.3.0"
 description = "Voice typing for Windows, Linux, and macOS"
 edition = "2024"
 rust-version = "1.93"

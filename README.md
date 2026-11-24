@@ -67,7 +67,7 @@ open publish/V2t.app
 
 Use **Copy** next to **Transcript** or **Copy Last Transcript** in the v2t menu bar menu to copy the latest result again.
 
-Open **Dictionary…** from the v2t window or menu bar to add spoken phrases and their replacements. Select a saved rule to update or remove it. Changes are saved immediately and apply to the next transcription.
+Open **Dictionary…** from the v2t window or menu bar to add spoken phrases and their replacements. Select a saved rule to update or remove it. Changes are saved immediately and apply to the next transcription. English replacements get a space where they touch adjacent words.
 
 To start recording from Spotlight, keep **V2t Record.app** beside **V2t.app** in a Spotlight-indexed folder such as `~/Applications`. Press **⌘Space**, search for **V2t Record**, and press **Return**. In the v2t window, click **Stop and Copy** to finish.
 

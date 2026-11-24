@@ -119,7 +119,7 @@ mod tests {
         let saved = Corrections::load(path).unwrap();
         assert!(!saved.enable_ai);
         assert_eq!(saved.entries.len(), 1);
-        assert_eq!(saved.apply("ใช้โอเพ่นเราเตอร์").0, "ใช้OpenRouter");
+        assert_eq!(saved.apply("ใช้โอเพ่นเราเตอร์").0, "ใช้ OpenRouter");
     }
 
     #[test]

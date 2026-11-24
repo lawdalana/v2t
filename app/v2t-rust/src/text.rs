@@ -1,6 +1,7 @@
 use crate::config::{invalid, read_bounded, save_json};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, io, path::Path};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -88,43 +89,57 @@ impl Corrections {
             .map(|entry| {
                 let left = needs_boundary(entry.spoken.chars());
                 let right = needs_boundary(entry.spoken.chars().rev());
-                (entry, folded(&entry.spoken), left, right)
+                (
+                    entry,
+                    folded(&entry.spoken),
+                    left,
+                    right,
+                    is_english(&entry.replacement),
+                )
             })
             .collect();
-        rules
-            .sort_by_key(|(entry, _, _, _)| std::cmp::Reverse(entry.spoken.encode_utf16().count()));
+        rules.sort_by_key(|(entry, ..)| std::cmp::Reverse(entry.spoken.encode_utf16().count()));
 
         let mut output = String::with_capacity(input.len());
         let mut applied = Vec::new();
         let mut offset = 0;
+        let mut previous_english = false;
         while offset < input.len() {
             let rest = &input[offset..];
-            let matched = rules.iter().find_map(|(entry, pattern, left, right)| {
-                if *left
-                    && input[..offset]
-                        .chars()
-                        .next_back()
-                        .is_some_and(english_word)
-                {
-                    return None;
-                }
-                let end = matches_prefix(rest, pattern)?;
-                if *right && rest[end..].chars().next().is_some_and(english_word) {
-                    return None;
-                }
-                Some((entry, end))
-            });
-            if let Some((entry, end)) = matched {
-                output.push_str(&entry.replacement);
+            let matched = rules
+                .iter()
+                .find_map(|(entry, pattern, left, right, english)| {
+                    if *left
+                        && input[..offset]
+                            .chars()
+                            .next_back()
+                            .is_some_and(english_word)
+                    {
+                        return None;
+                    }
+                    let end = matches_prefix(rest, pattern)?;
+                    if *right && rest[end..].chars().next().is_some_and(english_word) {
+                        return None;
+                    }
+                    Some((entry, end, *english))
+                });
+            let (piece, size, english) = if let Some((entry, end, english)) = matched {
                 if !applied.contains(&entry.replacement) {
                     applied.push(entry.replacement.clone());
                 }
-                offset += end;
+                (entry.replacement.as_str(), end, english)
             } else {
                 let ch = rest.chars().next().expect("nonempty remainder");
-                output.push(ch);
-                offset += ch.len_utf8();
+                (&rest[..ch.len_utf8()], ch.len_utf8(), false)
+            };
+            if (english || previous_english)
+                && needs_english_space(&output, piece, previous_english, english)
+            {
+                output.push(' ');
             }
+            output.push_str(piece);
+            previous_english = english;
+            offset += size;
         }
         (output, applied)
     }
@@ -162,6 +177,38 @@ fn needs_boundary(mut characters: impl Iterator<Item = char>) -> bool {
 
 fn english_word(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_english(text: &str) -> bool {
+    let mut letters = text.chars().filter(|ch| ch.is_alphabetic());
+    letters.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        && letters.all(|ch| ch.is_ascii_alphabetic())
+}
+
+fn needs_english_space(output: &str, piece: &str, previous_english: bool, english: bool) -> bool {
+    let (Some(left), Some(right)) = (output.chars().next_back(), piece.chars().next()) else {
+        return false;
+    };
+    if left.is_whitespace() || right.is_whitespace() {
+        return false;
+    }
+    match (previous_english, english) {
+        (true, true) => true,
+        (true, false) => word_neighbor(right),
+        (false, true) => word_neighbor(left),
+        (false, false) => false,
+    }
+}
+
+fn word_neighbor(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || ch == '_'
+        || matches!(
+            get_general_category(ch),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        )
 }
 
 pub fn for_insertion(input: &str) -> String {
@@ -205,8 +252,39 @@ mod tests {
             ],
         };
         let (text, terms) = dictionary.apply("ลองโอเพ่นเราเตอร์และ ai model, AIsa กับ ai");
-        assert_eq!(text, "ลองOpenRouterและ AI model, AIsa กับ เอไอ");
+        assert_eq!(text, "ลอง OpenRouter และ AI model, AIsa กับ เอไอ");
         assert_eq!(terms, ["OpenRouter", "AI model", "เอไอ"]);
+    }
+
+    #[test]
+    fn spaces_english_replacements_where_they_touch_words() {
+        let dictionary = Corrections {
+            enable_ai: false,
+            entries: [
+                ("โอเพ่นเราเตอร์", "OpenRouter"),
+                ("ซีพลัสพลัส", "C++"),
+                ("ดอทเน็ต", ".NET"),
+                ("เอไอ", " AI "),
+                ("คำผิด", "คำถูก"),
+            ]
+            .into_iter()
+            .map(|(spoken, replacement)| Entry {
+                spoken: spoken.into(),
+                replacement: replacement.into(),
+            })
+            .collect(),
+        };
+        for (input, expected) in [
+            ("ใช้อยู่โอเพ่นเราเตอร์ได้เลย", "ใช้อยู่ OpenRouter ได้เลย"),
+            ("ใช้ โอเพ่นเราเตอร์ ได้เลย", "ใช้ OpenRouter ได้เลย"),
+            ("(โอเพ่นเราเตอร์),", "(OpenRouter),"),
+            ("โอเพ่นเราเตอร์", "OpenRouter"),
+            ("เรียนซีพลัสพลัสดอทเน็ตได้", "เรียน C++ .NET ได้"),
+            ("ใช้เอไอวันนี้", "ใช้ AI วันนี้"),
+            ("ใช้คำผิดได้", "ใช้คำถูกได้"),
+        ] {
+            assert_eq!(dictionary.apply(input).0, expected, "input {input:?}");
+        }
     }
 
     #[test]

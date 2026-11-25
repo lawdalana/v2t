@@ -39,6 +39,14 @@ impl Engine {
             search_path.as_deref(),
         )
     }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn resolve_with_managed(self, managed: &Path) -> Result<PathBuf, InferenceError> {
+        self.resolve().or_else(|error| match error {
+            InferenceError::Unavailable(_) => executable_at(managed).ok_or(error),
+            _ => Err(error),
+        })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -142,7 +150,7 @@ mod tests {
                 super::super::random_hex::<8>().unwrap()
             ));
             fs::create_dir(&dir).unwrap();
-            Self(dir)
+            Self(dir.canonicalize().unwrap())
         }
 
         fn executable(&self, place: &str, name: &str, mode: u32) -> PathBuf {

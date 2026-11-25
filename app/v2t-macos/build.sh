@@ -59,21 +59,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-stage=$(mktemp -d "$publish_dir/.v2t-macos.XXXXXX")
-staged_bundle="$stage/V2t.app"
-staged_launcher="$stage/V2t Record.app"
-mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources" "$staged_launcher/Contents/MacOS"
-install -m 755 "$target_dir/$target/release/V2t" "$staged_bundle/Contents/MacOS/V2t"
-install -m 644 "$script_dir/Info.plist" "$staged_bundle/Contents/Info.plist"
-install -m 755 "$target_dir/$target/release/V2t" "$staged_launcher/Contents/MacOS/V2t"
-install -m 644 "$script_dir/RecordInfo.plist" "$staged_launcher/Contents/Info.plist"
-: > "$staged_bundle/Contents/Resources/Record.v2t-action"
-codesign --force --sign - --options runtime \
-    --entitlements "$script_dir/Entitlements.plist" "$staged_bundle"
-codesign --verify --strict "$staged_bundle"
-codesign --force --sign - --options runtime "$staged_launcher"
-codesign --verify --strict "$staged_launcher"
-
 for index in "${!bundle_names[@]}"; do
     name="${bundle_names[$index]}"
     bundle="$publish_dir/$name"
@@ -83,6 +68,33 @@ for index in "${!bundle_names[@]}"; do
         exit 1
     fi
 done
+
+stage=$(mktemp -d "$publish_dir/.v2t-macos.XXXXXX")
+staged_bundle="$stage/V2t.app"
+staged_launcher="$stage/V2t Record.app"
+resources="$staged_bundle/Contents/Resources"
+launcher_resources="$staged_launcher/Contents/Resources"
+mkdir -p "$staged_bundle/Contents/MacOS" "$resources" "$staged_launcher/Contents/MacOS" "$launcher_resources"
+install -m 755 "$target_dir/$target/release/V2t" "$staged_bundle/Contents/MacOS/V2t"
+whisper_server=${V2T_BUNDLE_WHISPER_SERVER:-"$publish_dir/V2t.app/Contents/MacOS/whisper-server"}
+if [[ -n ${V2T_BUNDLE_WHISPER_SERVER:-} && ( ! -f $whisper_server || ! -x $whisper_server ) ]]; then
+    printf 'V2T_BUNDLE_WHISPER_SERVER must point to an executable file.\n' >&2
+    exit 1
+fi
+if [[ -f $whisper_server && -x $whisper_server ]]; then
+    install -m 755 "$whisper_server" "$staged_bundle/Contents/MacOS/whisper-server"
+fi
+install -m 644 "$script_dir/Info.plist" "$staged_bundle/Contents/Info.plist"
+install -m 755 "$target_dir/$target/release/V2t" "$staged_launcher/Contents/MacOS/V2t"
+install -m 644 "$script_dir/RecordInfo.plist" "$staged_launcher/Contents/Info.plist"
+sips -s format icns "$repo_dir/app/V2t.Windows/Assets/v2t.ico" --out "$resources/V2t.icns" >/dev/null
+install -m 644 "$resources/V2t.icns" "$launcher_resources/V2t.icns"
+: > "$resources/Record.v2t-action"
+codesign --force --sign - --options runtime \
+    --entitlements "$script_dir/Entitlements.plist" "$staged_bundle"
+codesign --verify --strict "$staged_bundle"
+codesign --force --sign - --options runtime "$staged_launcher"
+codesign --verify --strict "$staged_launcher"
 
 publishing=1
 for name in "${bundle_names[@]}"; do

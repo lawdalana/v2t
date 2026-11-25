@@ -4,10 +4,12 @@ mod launcher;
 mod modifiers;
 mod preferences;
 mod recording;
+mod right_option;
 mod window;
 
 use std::{
     cell::{Cell, RefCell},
+    io,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::mpsc,
@@ -33,7 +35,7 @@ use objc2_foundation::{
 };
 
 use super::{
-    SpeechOptions, Storage,
+    Storage,
     clipboard::{CopyOutcome, copy_transcript},
     pipeline::{self, RecordingResult},
 };
@@ -41,12 +43,31 @@ use crate::models::LocalModels;
 use dictionary::DictionaryEditor;
 use hotkey::{Edge, Hotkey, Registration};
 use modifiers::ModifierShortcut;
-use preferences::{Preferences, Shortcut};
+use preferences::{CorrectionProvider, Preferences, Shortcut};
 use recording::{PendingTranscript, Recording};
+use right_option::RightOptionShortcut;
 use window::MainWindow;
 
 const READY: &str = "Ready to record";
 const MIC_SETTINGS: &str = "Allow v2t under Microphone in your Mac’s privacy settings";
+const RIGHT_OPTION_FOCUSED: &str =
+    "Right Option + Space works in this window. Allow Accessibility to use it in other apps.";
+
+pub(super) fn correction_enabled(config: &Path) -> bool {
+    Preferences::load(config).is_ok_and(|preferences| preferences.ai_correction)
+}
+
+pub(super) fn uses_litellm(config: &Path) -> bool {
+    Preferences::load(config)
+        .is_ok_and(|preferences| preferences.correction_provider == CorrectionProvider::LiteLlm)
+}
+
+pub(super) fn enable_litellm(config: &Path) -> std::io::Result<()> {
+    let mut preferences = Preferences::load(config)?;
+    preferences.ai_correction = true;
+    preferences.correction_provider = CorrectionProvider::LiteLlm;
+    preferences.save(config)
+}
 
 pub(super) fn run_from_bundle() -> Option<ExitCode> {
     let id = autoreleasepool(|_| {
@@ -90,7 +111,16 @@ enum State {
 #[derive(Clone, Copy)]
 enum RecordOrigin {
     Button,
-    Shortcut,
+    Shortcut(Shortcut),
+}
+
+impl RecordOrigin {
+    fn shortcut(self) -> Option<Shortcut> {
+        match self {
+            Self::Button => None,
+            Self::Shortcut(shortcut) => Some(shortcut),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,10 +129,12 @@ enum ShortcutAction {
     Stop,
 }
 
-fn shortcut_action(state: &State, edge: Edge) -> Option<ShortcutAction> {
+fn shortcut_action(state: &State, shortcut: Shortcut, edge: Edge) -> Option<ShortcutAction> {
     match (state, edge) {
         (State::Idle, Edge::Pressed) => Some(ShortcutAction::Start),
-        (State::Recording(RecordOrigin::Shortcut, _), Edge::Released) => Some(ShortcutAction::Stop),
+        (State::Recording(origin, _), Edge::Released) if origin.shortcut() == Some(shortcut) => {
+            Some(ShortcutAction::Stop)
+        }
         _ => None,
     }
 }
@@ -110,7 +142,13 @@ fn shortcut_action(state: &State, edge: Edge) -> Option<ShortcutAction> {
 enum Update {
     Microphone(bool),
     Transcript(RecordingResult),
-    Model(Result<(), String>),
+    ModelProgress(String),
+    Model(Result<(), String>, &'static str),
+}
+
+enum Model {
+    Speech,
+    Correction,
 }
 
 #[derive(Clone, Copy)]
@@ -139,11 +177,39 @@ struct ControllerIvars {
     dictionary: Retained<DictionaryEditor>,
     completion_sound: Option<Retained<NSSound>>,
     preferences: Cell<Preferences>,
-    hotkey: RefCell<Option<Hotkey>>,
-    modifier_shortcut: RefCell<Option<ModifierShortcut>>,
+    shortcuts: RefCell<ShortcutListeners>,
     state: RefCell<State>,
     launch_state: Cell<LaunchState>,
     timer: RefCell<Option<Retained<NSTimer>>>,
+}
+
+#[derive(Default)]
+struct ShortcutListeners {
+    carbon: Vec<Hotkey>,
+    right_command_option: Option<ModifierShortcut>,
+    right_option_space: Option<RightOptionShortcut>,
+}
+
+impl ShortcutListeners {
+    fn right_option_is_focused(&self) -> bool {
+        self.right_option_space
+            .as_ref()
+            .is_some_and(|shortcut| !shortcut.is_global())
+    }
+}
+
+fn prepare_registration<T>(
+    registration: io::Result<Option<T>>,
+    save: bool,
+    startup_error: &mut Option<io::Error>,
+) -> io::Result<Option<T>> {
+    match registration {
+        Err(error) if !save => {
+            startup_error.get_or_insert(error);
+            Ok(None)
+        }
+        result => result,
+    }
 }
 
 define_class!(
@@ -161,9 +227,15 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn applicationDidFinishLaunching(&self, _notification: &NSNotification) {
             self.present_window();
-            if let Err(error) = self.configure_shortcut(self.ivars().preferences.get(), false) {
-                eprintln!("v2t: {error}");
-                self.set_state(State::Idle, &error.to_string());
+            match self.configure_shortcuts(self.ivars().preferences.get(), false) {
+                Err(error) => {
+                    eprintln!("v2t: {error}");
+                    self.set_state(State::Idle, &error.to_string());
+                }
+                Ok(()) if self.ivars().shortcuts.borrow().right_option_is_focused() => {
+                    self.set_state(State::Idle, RIGHT_OPTION_FOCUSED);
+                }
+                Ok(()) => {}
             }
             if matches!(self.ivars().launch_state.replace(LaunchState::Ready), LaunchState::RecordRequested) {
                 self.start_from_launcher();
@@ -210,6 +282,11 @@ define_class!(
         fn applicationDidResignActive(&self, _notification: &NSNotification) {
             self.cancel_focused_shortcut();
         }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn applicationDidBecomeActive(&self, _notification: &NSNotification) {
+            self.activate_global_right_option();
+        }
     }
 
     #[allow(non_snake_case)] // Method name matches the AppKit delegate protocol.
@@ -249,18 +326,12 @@ define_class!(
 
         #[unsafe(method(installModel:))]
         fn install_model(&self, _sender: &NSObject) {
-            if matches!(*self.ivars().state.borrow(), State::Idle) {
-                let language = self.ivars().preferences.get().speech().language;
-                self.start_task("Downloading speech model…", move || {
-                    let result = (|| -> super::Result<()> {
-                        let storage = Storage::resolve()?;
-                        let models = LocalModels::new(storage.data)?;
-                        models.install_speech(language, |_| {})?;
-                        Ok(())
-                    })();
-                    Update::Model(result.map_err(|error| error.to_string()))
-                });
-            }
+            self.install(Model::Speech);
+        }
+
+        #[unsafe(method(installCorrectionModel:))]
+        fn install_correction_model(&self, _sender: &NSObject) {
+            self.install(Model::Correction);
         }
 
         #[unsafe(method(copyLastTranscript:))]
@@ -280,12 +351,31 @@ define_class!(
             let Some(preferences) = self.ivars().window.preferences() else {
                 return;
             };
-            match self.configure_shortcut(preferences, true) {
+            let enabling_right_option = preferences.shortcuts.contains(Shortcut::RightOptionSpace)
+                && !self.ivars().preferences.get().shortcuts.contains(Shortcut::RightOptionSpace);
+            match self.configure_shortcuts(preferences, true) {
                 Ok(()) => {
                     self.ivars().preferences.set(preferences);
-                    self.set_state(State::Idle, "Settings saved.");
+                    if self.ivars().shortcuts.borrow().right_option_is_focused() {
+                        self.set_state(State::Idle, RIGHT_OPTION_FOCUSED);
+                        if enabling_right_option {
+                            right_option::request_accessibility();
+                        }
+                    } else {
+                        self.set_state(State::Idle, "Settings saved.");
+                    }
                 }
                 Err(error) => self.set_state(State::Idle, &error.to_string()),
+            }
+        }
+
+        #[unsafe(method(requestShortcutAccessibility:))]
+        fn request_shortcut_accessibility(&self, _sender: &NSObject) {
+            if matches!(*self.ivars().state.borrow(), State::Idle)
+                && self.ivars().shortcuts.borrow().right_option_is_focused()
+            {
+                right_option::request_accessibility();
+                self.activate_global_right_option();
             }
         }
 
@@ -297,7 +387,8 @@ define_class!(
         #[unsafe(method(pollUpdates:))]
         fn poll_updates(&self, _timer: &NSTimer) {
             let update = match &*self.ivars().state.borrow() {
-                State::RequestingPermission(_, receiver) | State::Working(receiver) => receiver.try_recv(),
+                State::RequestingPermission(_, receiver) => receiver.try_recv(),
+                State::Working(receiver) => receiver.try_recv().map(|first| receiver.try_iter().last().unwrap_or(first)),
                 State::Transcribing(receiver) => receiver.try_recv().map(Update::Transcript),
                 _ => Err(mpsc::TryRecvError::Empty),
             };
@@ -330,8 +421,7 @@ impl Controller {
             dictionary: DictionaryEditor::new(main),
             completion_sound: NSSound::soundNamed(&NSString::from_str("Tink")),
             preferences: Cell::new(preferences),
-            hotkey: RefCell::new(None),
-            modifier_shortcut: RefCell::new(None),
+            shortcuts: RefCell::new(ShortcutListeners::default()),
             state: RefCell::new(State::Idle),
             launch_state: Cell::new(LaunchState::Starting),
             timer: RefCell::new(None),
@@ -363,83 +453,127 @@ impl Controller {
         this
     }
 
-    fn configure_shortcut(&self, preferences: Preferences, save: bool) -> super::Result<()> {
-        if preferences.shortcut == Shortcut::RightCommandOption {
-            return self.configure_modifier_shortcut(preferences, save);
+    fn configure_shortcuts(&self, preferences: Preferences, save: bool) -> super::Result<()> {
+        let mut installed = self.ivars().shortcuts.borrow_mut();
+        let selected = preferences.shortcuts;
+        let mut prepared = Vec::new();
+        let mut startup_error = None;
+        for shortcut in selected.iter().filter(|shortcut| shortcut.uses_carbon()) {
+            if installed
+                .carbon
+                .iter()
+                .any(|hotkey| hotkey.current() == shortcut)
+            {
+                continue;
+            }
+            let registration = Registration::new(self.mtm(), shortcut).and_then(|registration| {
+                let mut hotkey = Hotkey::new(self.mtm(), self.shortcut_handler(shortcut))?;
+                hotkey.apply(registration);
+                Ok(Some(hotkey))
+            });
+            prepared.extend(prepare_registration(
+                registration,
+                save,
+                &mut startup_error,
+            )?);
         }
-        let mut slot = self.ivars().hotkey.borrow_mut();
-        if slot.is_none() && preferences.shortcut != Shortcut::Off {
-            let weak = Weak::new(self);
-            *slot = Some(Hotkey::new(self.mtm(), move |edge| {
-                if let Some(controller) = weak.load() {
-                    controller.handle_shortcut(edge);
-                }
-            })?);
-        }
-        let prepared = slot
-            .as_ref()
-            .filter(|hotkey| hotkey.current() != preferences.shortcut)
-            .map(|_| Registration::new(self.mtm(), preferences.shortcut))
-            .transpose()?;
+
+        let enable_pair = selected.contains(Shortcut::RightCommandOption);
+        let pair = (enable_pair && installed.right_command_option.is_none())
+            .then(|| {
+                ModifierShortcut::new(
+                    self.mtm(),
+                    &self.ivars().window.window,
+                    self.shortcut_handler(Shortcut::RightCommandOption),
+                )
+            })
+            .transpose();
+        let new_pair = prepare_registration(pair, save, &mut startup_error)?;
+        let enable_right_option = selected.contains(Shortcut::RightOptionSpace);
+        let right_option = (enable_right_option
+            && (installed.right_option_space.is_none()
+                || (installed.right_option_is_focused() && right_option::has_accessibility())))
+        .then(|| self.make_right_option())
+        .transpose();
+        let new_right_option = prepare_registration(right_option, save, &mut startup_error)?;
+
+        // Keep the running shortcuts until the entire requested set is prepared and saved.
         if save {
             preferences.save(&Storage::resolve()?.config)?;
         }
-        if let (Some(hotkey), Some(registration)) = (slot.as_mut(), prepared) {
-            hotkey.apply(registration);
+        installed
+            .carbon
+            .retain(|hotkey| selected.contains(hotkey.current()));
+        installed.carbon.extend(prepared);
+        if !enable_pair || new_pair.is_some() {
+            installed.right_command_option = new_pair;
         }
-        self.ivars().modifier_shortcut.borrow_mut().take();
-        Ok(())
+        if !enable_right_option || new_right_option.is_some() {
+            installed.right_option_space = new_right_option;
+        }
+        startup_error.map_or(Ok(()), |error| Err(error.into()))
     }
 
-    fn configure_modifier_shortcut(
-        &self,
-        preferences: Preferences,
-        save: bool,
-    ) -> super::Result<()> {
-        let mut slot = self.ivars().modifier_shortcut.borrow_mut();
-        let replacement = if slot.is_some() {
-            None
-        } else {
-            let weak = Weak::new(self);
-            Some(ModifierShortcut::new(
-                self.mtm(),
-                &self.ivars().window.window,
-                move |edge| {
-                    if let Some(controller) = weak.load() {
-                        controller.handle_shortcut(edge);
-                    }
-                },
-            )?)
-        };
-        if save {
-            preferences.save(&Storage::resolve()?.config)?;
+    fn shortcut_handler(&self, shortcut: Shortcut) -> impl Fn(Edge) + 'static {
+        let weak = Weak::new(self);
+        move |edge| {
+            if let Some(controller) = weak.load() {
+                controller.handle_shortcut(shortcut, edge);
+            }
         }
-        self.ivars().hotkey.borrow_mut().take();
-        if let Some(replacement) = replacement {
-            *slot = Some(replacement);
+    }
+
+    fn make_right_option(&self) -> io::Result<RightOptionShortcut> {
+        RightOptionShortcut::new(
+            self.mtm(),
+            &self.ivars().window.window,
+            self.shortcut_handler(Shortcut::RightOptionSpace),
+        )
+    }
+
+    fn activate_global_right_option(&self) {
+        if !matches!(*self.ivars().state.borrow(), State::Idle)
+            || !self.ivars().shortcuts.borrow().right_option_is_focused()
+            || !right_option::has_accessibility()
+        {
+            return;
         }
-        Ok(())
+        if let Ok(shortcut) = self.make_right_option()
+            && shortcut.is_global()
+        {
+            self.ivars().shortcuts.borrow_mut().right_option_space = Some(shortcut);
+            self.set_state(State::Idle, "Right Option + Space is ready in other apps.");
+        }
     }
 
     fn cancel_focused_shortcut(&self) {
-        if let Some(shortcut) = self.ivars().modifier_shortcut.borrow().as_ref() {
-            shortcut.reset();
-        } else {
-            return;
+        let shortcuts = self.ivars().shortcuts.borrow();
+        if let Some(pair) = &shortcuts.right_command_option {
+            pair.reset();
         }
-        let recording = matches!(
-            *self.ivars().state.borrow(),
-            State::Recording(RecordOrigin::Shortcut, _)
-        );
+        if let Some(option_space) = &shortcuts.right_option_space {
+            option_space.reset_focused();
+        }
+        let right_option_is_focused = shortcuts.right_option_is_focused();
+        drop(shortcuts);
+        let recording = match &*self.ivars().state.borrow() {
+            State::Recording(RecordOrigin::Shortcut(Shortcut::RightCommandOption), _) => true,
+            State::Recording(RecordOrigin::Shortcut(Shortcut::RightOptionSpace), _) => {
+                right_option_is_focused
+            }
+            _ => false,
+        };
         if recording {
             self.set_state(State::Idle, "Recording canceled because v2t lost focus.");
         }
     }
 
-    fn handle_shortcut(&self, edge: Edge) {
-        let action = shortcut_action(&self.ivars().state.borrow(), edge);
+    fn handle_shortcut(&self, shortcut: Shortcut, edge: Edge) {
+        let action = shortcut_action(&self.ivars().state.borrow(), shortcut, edge);
         match action {
-            Some(ShortcutAction::Start) => self.request_microphone(RecordOrigin::Shortcut),
+            Some(ShortcutAction::Start) => {
+                self.request_microphone(RecordOrigin::Shortcut(shortcut))
+            }
             Some(ShortcutAction::Stop) => self.finish_recording(),
             None => {}
         }
@@ -482,7 +616,7 @@ impl Controller {
                         State::RequestingPermission(origin, receive),
                         match origin {
                             RecordOrigin::Button => "Waiting for microphone access…",
-                            RecordOrigin::Shortcut => {
+                            RecordOrigin::Shortcut(_) => {
                                 "Allow microphone access, then hold the shortcut again."
                             }
                         },
@@ -523,12 +657,35 @@ impl Controller {
         self.set_state(State::Transcribing(recording.finish()), "Transcribing…");
     }
 
-    fn start_task(&self, status: &str, work: impl FnOnce() -> Update + Send + 'static) {
+    fn install(&self, model: Model) {
+        if !matches!(*self.ivars().state.borrow(), State::Idle) {
+            return;
+        }
+        let (status, ready) = match model {
+            Model::Speech => ("Preparing speech model…", "Speech model ready"),
+            Model::Correction => ("Preparing local AI model…", "Typhoon 2.5 4B is ready"),
+        };
+        let language = self.ivars().preferences.get().speech().language;
         let (send, receive) = mpsc::channel();
         match thread::Builder::new()
-            .name("v2t-dictation".into())
+            .name("v2t-model-install".into())
             .spawn(move || {
-                let _ = send.send(work());
+                let result = (|| -> super::Result<()> {
+                    let storage = Storage::resolve()?;
+                    let models = LocalModels::new(storage.data)?;
+                    let report = |progress: &str| {
+                        let _ = send.send(Update::ModelProgress(progress.to_owned()));
+                    };
+                    match model {
+                        Model::Speech => models.install_speech(language, report)?,
+                        Model::Correction => models.install_correction(report)?,
+                    }
+                    Ok(())
+                })();
+                let _ = send.send(Update::Model(
+                    result.map_err(|error| error.to_string()),
+                    ready,
+                ));
             }) {
             Ok(_) => self.set_state(State::Working(receive), status),
             Err(error) => {
@@ -546,14 +703,18 @@ impl Controller {
                 };
                 return match origin {
                     RecordOrigin::Button => self.start_recording(origin),
-                    RecordOrigin::Shortcut => self.set_state(
+                    RecordOrigin::Shortcut(_) => self.set_state(
                         State::Idle,
                         "Microphone ready. Hold the shortcut to record.",
                     ),
                 };
             }
             Update::Microphone(false) => MIC_SETTINGS,
-            Update::Model(Ok(())) => "Speech model ready",
+            Update::ModelProgress(progress) => {
+                self.set_status(&NSString::from_str(&progress));
+                return;
+            }
+            Update::Model(Ok(()), ready) => ready,
             Update::Transcript(Ok(transcript)) => {
                 let status = copy_status(copy_transcript(transcript.text.as_deref(), |text| {
                     self.ivars().window.set_transcript(text);
@@ -568,9 +729,15 @@ impl Controller {
                         &format!("{status}. Dictation may be incomplete. {error}"),
                     );
                 }
+                if transcript.correction_fallback {
+                    return self.set_state(
+                        State::Idle,
+                        &format!("{status}. AI could not correct some text. Dictionary applied."),
+                    );
+                }
                 status
             }
-            Update::Model(Err(error)) | Update::Transcript(Err(error)) => {
+            Update::Model(Err(error), _) | Update::Transcript(Err(error)) => {
                 return self.set_state(State::Idle, &error);
             }
         };
@@ -588,26 +755,42 @@ impl Controller {
         }
     }
 
+    fn set_status(&self, status: &NSString) {
+        let menu = &self.ivars().menu;
+        menu.status.setTitle(status);
+        self.ivars().window.set_status(status);
+        if let Some(button) = menu.bar_item.button(self.mtm()) {
+            button.setToolTip(Some(status));
+        }
+    }
+
     fn set_state(&self, state: State, status: &str) {
         let idle = matches!(state, State::Idle);
         let recording = matches!(state, State::Recording(_, _));
         let working = matches!(state, State::Transcribing(_) | State::Working(_));
         let menu = &self.ivars().menu;
-        let status = NSString::from_str(status);
+        self.set_status(&NSString::from_str(status));
         let record_title = NSString::from_str(if recording {
             "Stop and Copy"
         } else {
             "Start Recording"
         });
-        menu.status.setTitle(&status);
         menu.record.setTitle(&record_title);
         menu.record.setEnabled(idle || recording);
         menu.install.setEnabled(idle);
         menu.quit.setEnabled(!working);
         menu.app_quit.setEnabled(!working);
-        self.ivars()
-            .window
-            .update(&record_title, &status, idle, recording);
+        self.ivars().window.update(
+            &record_title,
+            idle,
+            recording,
+            self.ivars()
+                .shortcuts
+                .borrow()
+                .right_option_space
+                .as_ref()
+                .map(RightOptionShortcut::is_global),
+        );
         if let Some(button) = menu.bar_item.button(self.mtm()) {
             let title = match &state {
                 State::Recording(_, _) => "v2t ●",
@@ -615,7 +798,6 @@ impl Controller {
                 _ => "v2t",
             };
             button.setTitle(&NSString::from_str(title));
-            button.setToolTip(Some(&status));
         }
         self.ivars().state.replace(state);
 
@@ -764,20 +946,28 @@ mod tests {
     #[test]
     fn shortcut_edges_leave_the_pending_system_permission_prompt_in_place() {
         let (_send, receive) = mpsc::channel();
-        let state = State::RequestingPermission(RecordOrigin::Shortcut, receive);
-        assert_eq!(shortcut_action(&state, Edge::Pressed), None);
-        assert_eq!(shortcut_action(&state, Edge::Released), None);
+        let shortcut = Shortcut::CommandShiftSpace;
+        let state = State::RequestingPermission(RecordOrigin::Shortcut(shortcut), receive);
+        assert_eq!(shortcut_action(&state, shortcut, Edge::Pressed), None);
+        assert_eq!(
+            shortcut_action(&state, Shortcut::RightOptionSpace, Edge::Released),
+            None
+        );
     }
 
     #[test]
     fn a_shortcut_only_starts_when_ready_and_never_cancels_a_manual_request() {
         let (_send, receive) = mpsc::channel();
+        let shortcut = Shortcut::RightOptionSpace;
         let state = State::RequestingPermission(RecordOrigin::Button, receive);
-        assert_eq!(shortcut_action(&state, Edge::Pressed), None);
-        assert_eq!(shortcut_action(&state, Edge::Released), None);
-        assert_eq!(shortcut_action(&State::Idle, Edge::Released), None);
+        assert_eq!(shortcut_action(&state, shortcut, Edge::Pressed), None);
+        assert_eq!(shortcut_action(&state, shortcut, Edge::Released), None);
         assert_eq!(
-            shortcut_action(&State::Idle, Edge::Pressed),
+            shortcut_action(&State::Idle, shortcut, Edge::Released),
+            None
+        );
+        assert_eq!(
+            shortcut_action(&State::Idle, shortcut, Edge::Pressed),
             Some(ShortcutAction::Start)
         );
     }

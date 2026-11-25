@@ -4,6 +4,8 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -17,7 +19,7 @@ use super::{CORRECTION_ENGINE_PATH, SPEECH_ENGINE_PATH};
 use super::{CORRECTION_MODEL_FILE, SpeechModel, random_hex};
 use crate::inference::InferenceError;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "linux"))]
 const MAX_ARCHIVE_BYTES: u64 = 1 << 30;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const MAX_EXPANDED_BYTES: u64 = 2 << 30;
@@ -39,6 +41,27 @@ const SPEECH_ENGINE: Asset = Asset {
 const CORRECTION_ENGINE: Asset = Asset {
     url: "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-win-vulkan-x64.zip",
     sha256: "720d59998a51423a1c50c99326a5d5358b80e89d75f8fdafc50a26479d1bad68",
+};
+
+#[cfg(target_os = "macos")]
+const MAC_CORRECTION_ARCHIVE_DIR: &str = "llama-b12633";
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(super) const MAC_CORRECTION_ENGINE_DIR: &str = "llama-b12633-arm64";
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub(super) const MAC_CORRECTION_ENGINE_DIR: &str = "llama-b12633-x64";
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const MAC_CORRECTION_ENGINE: Asset = Asset {
+    url: "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-macos-arm64.tar.gz",
+    sha256: "99657876053df9004753d92075813bbb3b484e79f8a402809b51d00c8c540062",
+};
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const MAC_CORRECTION_ENGINE: Asset = Asset {
+    url: "https://github.com/ggml-org/llama.cpp/releases/download/b12633/llama-b12633-bin-macos-x64.tar.gz",
+    sha256: "42e69b4d89531197ec0551f288347a71856c4613e52030196486b888c82b8892",
 };
 
 const CORRECTION_MODEL: Asset = Asset {
@@ -111,6 +134,54 @@ pub(super) fn install_correction_assets(
         )?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn install_macos_correction_engine(directory: &Path) -> Result<(), InferenceError> {
+    fs::create_dir_all(directory).map_err(installation_error)?;
+    let destination = directory.join(MAC_CORRECTION_ENGINE_DIR);
+    let staging = TemporaryPath::new(&destination, ".staging", true)?;
+    fs::create_dir(&staging.path).map_err(installation_error)?;
+    let archive = staging.path.join("engine.tar.gz");
+    download(
+        &download_client(Duration::from_secs(180))?,
+        MAC_CORRECTION_ENGINE,
+        &archive,
+        MAX_ARCHIVE_BYTES,
+        |_| {},
+    )?;
+
+    // Extract the pinned release after its SHA-256 has been verified. The server
+    // needs the versioned dylibs and their symlinks from the same directory.
+    let extracted = Command::new("/usr/bin/tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging.path)
+        .arg(MAC_CORRECTION_ARCHIVE_DIR)
+        .status()
+        .is_ok_and(|status| status.success());
+    if !extracted {
+        return Err(InferenceError::Unavailable(
+            "Could not unpack the verified llama-server archive.",
+        ));
+    }
+
+    let expanded = staging.path.join(MAC_CORRECTION_ARCHIVE_DIR);
+    let executable = Path::new("llama-server");
+    let runs = Command::new(expanded.join(executable))
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !runs {
+        return Err(InferenceError::Unavailable(
+            "Could not run the downloaded llama-server. It requires macOS 13.3 or later.",
+        ));
+    }
+    publish_asset(&expanded, &destination, Some(executable))
 }
 
 fn download_client(timeout: Duration) -> Result<Client, InferenceError> {

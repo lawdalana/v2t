@@ -1,18 +1,21 @@
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained, runtime::Sel, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSBezelStyle, NSBorderType, NSButton, NSColor,
-    NSControlSize, NSFont, NSPopUpButton, NSScrollView, NSTextField, NSTextView, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSFont, NSPopUpButton,
+    NSScrollView, NSTextField, NSTextView, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
 use super::{
     READY,
-    preferences::{Language, Preferences, Shortcut},
+    preferences::{CorrectionProvider, Language, Preferences, Shortcut},
+    right_option,
 };
 
 const WIDTH: f64 = 508.0;
-const HEIGHT: f64 = 460.0;
+const SHORTCUT_ROW_HEIGHT: f64 = 24.0;
+const TOP_SHORTCUT_Y: f64 = 360.0 + (Shortcut::OPTIONS.len() - 1) as f64 * SHORTCUT_ROW_HEIGHT;
+const HEIGHT: f64 = TOP_SHORTCUT_Y + 140.0;
 const MARGIN: f64 = 24.0;
 const CONTENT_WIDTH: f64 = WIDTH - MARGIN * 2.0;
 const FIELD_X: f64 = 181.0;
@@ -22,7 +25,10 @@ pub(super) struct MainWindow {
     pub(super) window: Retained<NSWindow>,
     status: Retained<NSTextField>,
     language: Retained<NSPopUpButton>,
-    shortcut: Retained<NSPopUpButton>,
+    shortcuts: [Retained<NSButton>; Shortcut::OPTIONS.len()],
+    shortcut_accessibility: Retained<NSButton>,
+    ai_correction: Retained<NSPopUpButton>,
+    install_correction: Retained<NSButton>,
     dictionary: Retained<NSButton>,
     record: Retained<NSButton>,
     install: Retained<NSButton>,
@@ -57,16 +63,20 @@ impl MainWindow {
         let title = label(
             main,
             "Dictation settings",
-            rect(MARGIN, 399.0, CONTENT_WIDTH - 126.0, 38.0),
+            rect(MARGIN, HEIGHT - 61.0, CONTENT_WIDTH - 126.0, 38.0),
         );
         title.setFont(Some(&NSFont::boldSystemFontOfSize(29.0)));
         let dictionary = button(
             main,
             "Dictionary…",
             sel!(showDictionary:),
-            rect(WIDTH - MARGIN - 114.0, 401.0, 114.0, 34.0),
+            rect(WIDTH - MARGIN - 114.0, HEIGHT - 59.0, 114.0, 34.0),
         );
-        let language_label = label(main, "Dictation language", rect(MARGIN, 362.0, 150.0, 20.0));
+        let language_label = label(
+            main,
+            "Dictation language",
+            rect(MARGIN, HEIGHT - 98.0, 150.0, 20.0),
+        );
         let language = popup(
             main,
             Language::OPTIONS.map(Language::label),
@@ -74,24 +84,70 @@ impl MainWindow {
                 .iter()
                 .position(|&item| item == preferences.language)
                 .unwrap_or(0),
-            rect(FIELD_X, 357.0, FIELD_WIDTH, 30.0),
+            rect(FIELD_X, HEIGHT - 103.0, FIELD_WIDTH, 30.0),
         );
-        let shortcut_label = label(main, "Hold to dictate", rect(MARGIN, 320.0, 150.0, 20.0));
-        let shortcut = popup(
+        let shortcut_label = label(
             main,
-            Shortcut::OPTIONS.map(Shortcut::label),
-            Shortcut::OPTIONS
-                .iter()
-                .position(|&item| item == preferences.shortcut)
-                .unwrap_or(0),
-            rect(FIELD_X, 315.0, FIELD_WIDTH, 30.0),
+            "Hold to dictate",
+            rect(MARGIN, TOP_SHORTCUT_Y + 2.0, 150.0, 20.0),
         );
+        let shortcuts = std::array::from_fn(|index| {
+            let shortcut = Shortcut::OPTIONS[index];
+            // SAFETY: AppKit toggles the checkbox locally until Save Settings is pressed.
+            let button = unsafe {
+                NSButton::checkboxWithTitle_target_action(
+                    &NSString::from_str(shortcut.label()),
+                    None,
+                    None,
+                    main,
+                )
+            };
+            button.setFrame(rect(
+                FIELD_X,
+                TOP_SHORTCUT_Y - index as f64 * SHORTCUT_ROW_HEIGHT,
+                FIELD_WIDTH,
+                SHORTCUT_ROW_HEIGHT,
+            ));
+            button.setState(if preferences.shortcuts.contains(shortcut) {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+            button
+        });
         let instructions = label(
             main,
-            "Hold the shortcut to record. Release it to copy.",
-            rect(FIELD_X, 288.0, FIELD_WIDTH, 20.0),
+            "Hold any checked shortcut. Release it to copy.",
+            rect(FIELD_X, 332.0, FIELD_WIDTH, 20.0),
         );
         instructions.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let shortcut_accessibility = button(
+            main,
+            "Allow Accessibility…",
+            sel!(requestShortcutAccessibility:),
+            rect(MARGIN, 326.0, 146.0, 30.0),
+        );
+        shortcut_accessibility.setControlSize(NSControlSize::Small);
+        shortcut_accessibility.setHidden(true);
+
+        let correction_label = label(main, "AI correction", rect(MARGIN, 291.0, 98.0, 20.0));
+        let selected = match (preferences.ai_correction, preferences.correction_provider) {
+            (false, _) => 0,
+            (true, CorrectionProvider::Local) => 1,
+            (true, CorrectionProvider::LiteLlm) => 2,
+        };
+        let ai_correction = popup(
+            main,
+            ["Off", "Typhoon 2.5 4B (local)", "LiteLLM"],
+            selected,
+            rect(122.0, 286.0, 200.0, 30.0),
+        );
+        let install_correction = button(
+            main,
+            "Install Local AI",
+            sel!(installCorrectionModel:),
+            rect(WIDTH - MARGIN - 148.0, 282.0, 148.0, 38.0),
+        );
 
         let record = button(
             main,
@@ -164,8 +220,18 @@ impl MainWindow {
             &*language_label,
             &*language,
             &*shortcut_label,
-            &*shortcut,
-            &*instructions,
+        ] {
+            view.addSubview(child);
+        }
+        for shortcut in &shortcuts {
+            view.addSubview(shortcut);
+        }
+        for child in [
+            &*instructions as &NSView,
+            &*shortcut_accessibility,
+            &*correction_label,
+            &*ai_correction,
+            &*install_correction,
             &*install,
             &*record,
             &*save,
@@ -183,7 +249,10 @@ impl MainWindow {
             window,
             status,
             language,
-            shortcut,
+            shortcuts,
+            shortcut_accessibility,
+            ai_correction,
+            install_correction,
             dictionary,
             record,
             install,
@@ -199,29 +268,68 @@ impl MainWindow {
         unsafe {
             self.record.setTarget(Some(target));
             self.install.setTarget(Some(target));
+            self.install_correction.setTarget(Some(target));
             self.save.setTarget(Some(target));
             self.copy.setTarget(Some(target));
             self.dictionary.setTarget(Some(target));
+            self.shortcut_accessibility.setTarget(Some(target));
         }
     }
 
     pub(super) fn preferences(&self) -> Option<Preferences> {
+        let (ai_correction, correction_provider) = match self.ai_correction.indexOfSelectedItem() {
+            0 => (false, CorrectionProvider::Local),
+            1 => (true, CorrectionProvider::Local),
+            2 => (true, CorrectionProvider::LiteLlm),
+            _ => return None,
+        };
         Some(Preferences {
             language: *Language::OPTIONS
                 .get(usize::try_from(self.language.indexOfSelectedItem()).ok()?)?,
-            shortcut: *Shortcut::OPTIONS
-                .get(usize::try_from(self.shortcut.indexOfSelectedItem()).ok()?)?,
+            shortcuts: Shortcut::OPTIONS
+                .into_iter()
+                .zip(&self.shortcuts)
+                .filter_map(|(shortcut, button)| {
+                    (button.state() == NSControlStateValueOn).then_some(shortcut)
+                })
+                .collect(),
+            ai_correction,
+            correction_provider,
         })
     }
 
-    pub(super) fn update(&self, title: &NSString, status: &NSString, idle: bool, recording: bool) {
+    pub(super) fn set_status(&self, status: &NSString) {
+        self.status.setStringValue(status);
+    }
+
+    pub(super) fn update(
+        &self,
+        title: &NSString,
+        idle: bool,
+        recording: bool,
+        right_option_global: Option<bool>,
+    ) {
         self.record.setTitle(title);
         self.record.setEnabled(idle || recording);
         self.install.setEnabled(idle);
+        self.install_correction.setEnabled(idle);
+        self.ai_correction.setEnabled(idle);
         self.language.setEnabled(idle);
-        self.shortcut.setEnabled(idle);
+        for (shortcut, button) in Shortcut::OPTIONS.into_iter().zip(&self.shortcuts) {
+            button.setEnabled(idle);
+            if shortcut == Shortcut::RightOptionSpace {
+                let title = if right_option_global.unwrap_or_else(right_option::has_accessibility) {
+                    NSString::from_str(shortcut.label())
+                } else {
+                    NSString::from_str(&format!("{} (v2t focus)", shortcut.label()))
+                };
+                button.setTitle(&title);
+            }
+        }
+        self.shortcut_accessibility
+            .setHidden(right_option_global != Some(false));
+        self.shortcut_accessibility.setEnabled(idle);
         self.save.setEnabled(idle);
-        self.status.setStringValue(status);
         let color = if recording {
             NSColor::systemRedColor()
         } else {

@@ -28,6 +28,7 @@ const SOCKET: &str = "worker-v1.sock";
 const REQUEST_LIMIT: usize = 64 * 1024;
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_TIMEOUT_MS: u32 = 90_000;
+pub(super) const CORRECTION_STARTUP_TIMEOUT: Duration = Duration::from_secs(55);
 
 #[derive(Serialize, Deserialize)]
 enum Request {
@@ -100,10 +101,13 @@ pub(super) fn run(storage: &Storage) -> io::Result<()> {
 
     // Preload installed assets only. Login launches never download models or send
     // cloud requests. A later request can load a different installed speech model.
-    let correction = Corrections::load(&storage.config)
+    let correction_enabled = Corrections::load(&storage.config)
         .ok()
-        .is_some_and(|settings| settings.enable_ai)
-        && models.correction_available();
+        .is_some_and(|settings| settings.enable_ai);
+    #[cfg(target_os = "macos")]
+    let correction_enabled = !super::macos::uses_litellm(&storage.config)
+        && (correction_enabled || super::macos::correction_enabled(&storage.config));
+    let correction = correction_enabled && models.correction_available();
     let speech = models.speech_available(Some(MIXED));
     let warmup_budget = Duration::from_secs(55);
     match (speech, correction) {
@@ -137,6 +141,8 @@ pub(super) fn run(storage: &Storage) -> io::Result<()> {
 }
 
 fn serve(connection: &mut UnixStream, models: &mut LocalModels) -> io::Result<bool> {
+    // macOS can inherit nonblocking mode from the listener on accept.
+    connection.set_nonblocking(false)?;
     connection.set_read_timeout(Some(Duration::from_secs(3)))?;
     connection.set_write_timeout(Some(Duration::from_secs(3)))?;
     let reply_timeout =
@@ -171,10 +177,9 @@ fn serve(connection: &mut UnixStream, models: &mut LocalModels) -> io::Result<bo
             timeout_ms,
         } => {
             let timeout = reply_timeout(timeout_ms);
-            // Corrections are local and optional. An unavailable warmed model
-            // falls back to dictionary replacements on the calling client.
             let result = models
-                .correct(&text, &protected, timeout)
+                .warm_correction(CORRECTION_STARTUP_TIMEOUT)
+                .and_then(|()| models.correct(&text, &protected, timeout))
                 .map_err(Failure::from);
             send(connection, &result, RESPONSE_LIMIT)?;
         }
@@ -221,8 +226,12 @@ pub(super) fn correct(
         protected: protected.to_vec(),
         timeout_ms: millis(timeout),
     };
-    let result: io::Result<Result<Option<String>, Failure>> =
-        request_reply(connection, &request, &[], timeout);
+    let result: io::Result<Result<Option<String>, Failure>> = request_reply(
+        connection,
+        &request,
+        &[],
+        CORRECTION_STARTUP_TIMEOUT + timeout,
+    );
     Some(
         result
             .map_err(io_failure)
@@ -411,6 +420,22 @@ mod tests {
             receive::<Request>(&mut wire.as_slice(), REQUEST_LIMIT),
             Ok(Request::Stop)
         ));
+    }
+
+    #[test]
+    fn accepted_connection_waits_for_the_request() {
+        let fixture = Fixture::new();
+        let socket = ServiceSocket::bind(&fixture.0).unwrap().unwrap();
+        let client = UnixStream::connect(&socket.path).unwrap();
+        let (mut connection, _) = socket.listener.accept().unwrap();
+        let mut models = LocalModels::new(fixture.0.clone()).unwrap();
+        let client = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            request_reply::<bool>(client, &Request::Stop, &[], Duration::from_secs(2))
+        });
+        let served = serve(&mut connection, &mut models);
+        assert!(served.unwrap());
+        assert!(client.join().unwrap().unwrap());
     }
 
     #[test]

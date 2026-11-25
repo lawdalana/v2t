@@ -20,11 +20,21 @@ class MacBundleTests(unittest.TestCase):
             for file in source.glob(name):
                 shutil.copyfile(file, self.script.parent / name)
 
+        windows_icon = self.repo / 'app/V2t.Windows/Assets/v2t.ico'
+        windows_icon.parent.mkdir(parents=True)
+        windows_icon.write_bytes(b'Windows V2t icon')
+
         self.bundle = self.repo / 'publish/V2t.app'
         self.launcher = self.repo / 'publish/V2t Record.app'
         self.tools = root / 'tools'
         self.tools.mkdir()
         self.mock_tool('uname', 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac')
+        self.mock_tool('sips', r'''
+test "$1 $2 $3" = '-s format icns'
+test "$(cat "$4")" = 'Windows V2t icon'
+test "$5" = '--out'
+printf 'macOS V2t icon' > "$6"
+''')
         self.mock_tool('plutil', r'''
 python3 - "${@: -1}" <<'PY'
 import plistlib
@@ -89,13 +99,39 @@ fi
         self.assertEqual(executable.read_text(), 'built executable')
         self.assertTrue(os.access(executable, os.X_OK))
         self.assertEqual(info['CFBundleIdentifier'], 'com.lawdalana.v2t')
-        self.assertEqual(info['CFBundleShortVersionString'], '2.3.0')
+        self.assertEqual(info['CFBundleShortVersionString'], '2.4.0')
         self.assertEqual(info['LSMinimumSystemVersion'], '12.0')
         self.assertFalse(info.get('LSUIElement', False))
         self.assertTrue(info['NSMicrophoneUsageDescription'])
         with (self.script.parent / 'Entitlements.plist').open('rb') as file:
             self.assertEqual(plistlib.load(file), {'com.apple.security.device.audio-input': True})
         self.assertTrue((self.bundle / 'Contents/_CodeSignature/CodeResources').is_file())
+
+    def test_desktop_and_launcher_use_the_windows_icon(self):
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for bundle in (self.bundle, self.launcher):
+            with self.subTest(bundle=bundle.name):
+                contents = bundle / 'Contents'
+                info = plistlib.loads((contents / 'Info.plist').read_bytes())
+                icon = info.get('CFBundleIconFile')
+                self.assertIsNotNone(icon, 'Bundle should declare its icon')
+                self.assertEqual((contents / 'Resources' / icon).read_bytes(), b'macOS V2t icon')
+
+    def test_can_bundle_the_existing_whisper_worker(self):
+        worker = self.tools / 'whisper-server'
+        worker.write_bytes(b'local speech worker')
+        worker.chmod(0o700)
+        result = self.build(V2T_BUNDLE_WHISPER_SERVER=str(worker))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundled = self.bundle / 'Contents/MacOS/whisper-server'
+        self.assertEqual(bundled.read_bytes(), worker.read_bytes())
+        self.assertTrue(os.access(bundled, os.X_OK))
+
+        rebuilt = self.build(V2T_BUNDLE_WHISPER_SERVER='')
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+        self.assertTrue(bundled.is_file())
+        self.assertEqual(bundled.read_bytes(), worker.read_bytes())
 
     def test_failed_signing_preserves_an_existing_bundle(self):
         initial = self.build()
@@ -114,7 +150,7 @@ fi
             info = plistlib.load(file)
         self.assertEqual(info['CFBundleIdentifier'], 'com.lawdalana.v2t.record')
         self.assertEqual(info['CFBundleDisplayName'], 'V2t Record')
-        self.assertEqual(info['CFBundleShortVersionString'], '2.3.0')
+        self.assertEqual(info['CFBundleShortVersionString'], '2.4.0')
         self.assertFalse(info.get('LSUIElement', False))
         self.assertTrue(os.access(self.launcher / 'Contents/MacOS' / info['CFBundleExecutable'], os.X_OK))
         self.assertTrue((self.launcher / 'Contents/_CodeSignature/CodeResources').is_file())

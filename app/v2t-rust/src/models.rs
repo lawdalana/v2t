@@ -127,7 +127,15 @@ impl LocalModels {
     }
 
     fn correction_engine(&self) -> Result<PathBuf, InferenceError> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "macos")]
+        {
+            let managed = self
+                .correction_dir
+                .join(assets::MAC_CORRECTION_ENGINE_DIR)
+                .join("llama-server");
+            linux::Engine::Correction.resolve_with_managed(&managed)
+        }
+        #[cfg(target_os = "linux")]
         {
             linux::Engine::Correction.resolve()
         }
@@ -311,7 +319,7 @@ impl LocalModels {
         }
         self.suspend_correction();
         let budget = Budget::new(timeout);
-        let worker = if vulkan_present() {
+        let worker = if correction_gpu_available() {
             match self.start_correction(&executable, true, budget) {
                 Ok(worker) => worker,
                 Err(_) => self.start_correction(&executable, false, budget)?,
@@ -424,8 +432,21 @@ impl LocalModels {
         install_speech_asset(&self.speech_dir, preferred(language.as_deref()), report)
     }
 
-    pub fn install_correction(&self, report: impl FnMut(&str)) -> Result<(), InferenceError> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn install_correction(
+        &self,
+        #[allow(unused_mut)] mut report: impl FnMut(&str),
+    ) -> Result<(), InferenceError> {
+        #[cfg(target_os = "macos")]
+        match self.correction_engine() {
+            Err(InferenceError::Unavailable(_)) => {
+                report("Downloading the local AI engine…");
+                assets::install_macos_correction_engine(&self.correction_dir)?;
+            }
+            result => {
+                result?;
+            }
+        }
+        #[cfg(target_os = "linux")]
         self.correction_engine()?;
         install_correction_assets(&self.correction_dir, report)
     }
@@ -607,10 +628,14 @@ fn command_for(executable: &Path) -> Command {
     command
 }
 
-fn vulkan_present() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn correction_gpu_available() -> bool {
+    #[cfg(target_os = "linux")]
     {
         false
+    }
+    #[cfg(target_os = "macos")]
+    {
+        cfg!(target_arch = "aarch64")
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     std::env::var_os("SystemRoot").is_some_and(|root| {

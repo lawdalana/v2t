@@ -6,6 +6,8 @@
     <string>v2t</string>
     <key>CFBundleExecutable</key>
     <string>V2t</string>
+    <key>CFBundleIconFile</key>
+    <string>V2t.icns</string>
     <key>CFBundleIdentifier</key>
     <string>com.lawdalana.v2t</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -15,7 +17,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.3.0</string>
+    <string>2.4.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

@@ -352,6 +352,7 @@ mod tests {
         send.send(Ok(RecordingTranscript {
             text: Some("earlier speech".to_owned()),
             partial_failure: None,
+            correction_fallback: false,
         }))
         .unwrap();
         let pending = PendingTranscript {

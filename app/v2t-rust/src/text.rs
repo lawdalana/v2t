@@ -219,6 +219,18 @@ fn english_word(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+pub(crate) fn exact_term_count(text: &str, term: &str) -> usize {
+    let left = needs_boundary(term.chars());
+    let right = needs_boundary(term.chars().rev());
+    text.match_indices(term)
+        .filter(|(start, _)| {
+            let end = *start + term.len();
+            (!left || !text[..*start].chars().next_back().is_some_and(english_word))
+                && (!right || !text[end..].chars().next().is_some_and(english_word))
+        })
+        .count()
+}
+
 fn is_english(text: &str) -> bool {
     let mut letters = text.chars().filter(|ch| ch.is_alphabetic());
     letters.next().is_some_and(|ch| ch.is_ascii_alphabetic())

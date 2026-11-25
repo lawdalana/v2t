@@ -1,6 +1,6 @@
 # v2t
 
-Voice typing for Windows and Linux, with a macOS 2.3 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
+Voice typing for Windows and Linux, with a macOS 2.4 development build. v2t is written in Rust and starts the local speech and correction engines as separate processes. Download released packages from [GitHub Releases](https://github.com/lawdalana/v2t/releases).
 
 ## Windows desktop
 
@@ -34,7 +34,7 @@ Open **Dictionary & AI** from the v2t tray menu or Settings. Enter a pair such a
 
 Use **Export…** to save the dictionary as a JSON file for backup or transfer between Windows and macOS. **Import…** adds new spoken terms and keeps your existing replacements for matching terms. Your local AI preference stays the same. On Windows, click **Save dictionary** to apply the imported rows. On macOS, imports are saved immediately.
 
-Enable **Use local AI to correct dictation** to send the mapped text to Typhoon 2.5 4B on this computer for spelling and punctuation cleanup. The model download is about 2.3 GiB. If the model is unavailable, takes too long, or changes a protected replacement, v2t inserts the dictionary result.
+On Windows, enable **Use local AI to correct dictation** in **Dictionary & AI**. On macOS, choose a model under **AI correction**. v2t passes the mapped text to the selected model for spelling and punctuation cleanup. If the model is unavailable, takes too long, or changes a protected replacement, v2t uses the dictionary result.
 
 ### Usage log
 
@@ -58,7 +58,7 @@ To enable local AI correction, run `./v2t setup --correction`, then add `--corre
 
 Use `--provider openai` or `--provider openrouter` to opt into cloud transcription with the respective `OPENAI_API_KEY` or `OPENROUTER_API_KEY` environment variable. In Local mode, add `--mai-backup` to enable the same ZDR-requested MAI backup on failure. Use the OpenRouter key with **ZDR only** configured as described above.
 
-## macOS desktop (2.3 development build)
+## macOS desktop (2.4 development build)
 
 Build on macOS 12 or later with Rust and the Xcode command-line tools. Install `whisper-server` for the Mac's architecture. With Homebrew already installed, `brew install whisper.cpp` provides it. See the [Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp).
 
@@ -67,19 +67,31 @@ bash app/v2t-macos/build.sh
 open publish/V2t.app
 ```
 
-1. In the v2t window, choose your **Dictation language** and **Hold to dictate** shortcut, then click **Save Settings**. Choose **Install Speech Model** if you need the local model for that language.
-2. Hold **Control + Shift + Space** to record. The first time, allow microphone access at the macOS prompt, then hold the shortcut again. Settings also offers **Command + Shift + Space**, **Control + F9**, **Right Command + Right Option (v2t active)**, and **Off**. Use the right-side pair while the v2t window has keyboard focus.
+1. In the v2t window, choose your **Dictation language**, check any **Hold to dictate** shortcuts you want, then click **Save Settings**. Clearing every checkbox disables the shortcuts. Choose **Install Speech Model** if you need the local model for that language.
+2. Hold **Control + Shift + Space**, the default, or any checked shortcut to record. The first time, allow microphone access at the macOS prompt, then hold the shortcut again. **Right Option + Space** works in the v2t window. Use **Allow Accessibility…** to enable it in other apps under **System Settings → Privacy & Security → Accessibility**. **Right Command + Right Option** works while the v2t window has keyboard focus.
 3. Release the shortcut to finish recording and copy the result. A short sound plays when the transcript is ready. Press **⌘V** in your destination app. You can also use **Start Recording** and **Stop and Copy** in the window.
+
+**Command + Option + Space** accepts either side of both modifier keys and can be used from other apps. macOS also assigns this combination to opening Finder search by default. [Apple Spotlight shortcuts](https://support.apple.com/en-gb/guide/mac-help/mh26783/26/mac/26)
 
 Use **Copy** next to **Transcript** or **Copy Last Transcript** in the v2t menu bar menu to copy the latest result again.
 
 Open **Dictionary…** from the v2t window or menu bar to add spoken phrases and their replacements. Select a saved rule to update or remove it. Use **Import…** and **Export…** to transfer dictionary rules as JSON. Changes are saved immediately and apply to the next transcription. English replacements get a space where they touch adjacent words.
 
+Click **Install Local AI** to download the Typhoon 2.5 4B correction model (about 2.3 GiB) and `llama-server` if needed. The automatic engine download requires macOS 13.3 or later. On older macOS versions you can provide a compatible `llama-server` using `V2T_LLAMA_SERVER`. After installation, choose **Typhoon 2.5 4B (local)** under **AI correction** and click **Save Settings**.
+
+To use LiteLLM for correction, pipe the gateway key to `setup-litellm` and provide the HTTPS base URL and model alias as arguments. The command tests the selected model and stores the key in macOS Keychain. It then selects **LiteLLM** under **AI correction**. Reopen the app to load the updated settings. v2t sends the text and protected dictionary terms to the gateway after local speech recognition and dictionary replacement. [LiteLLM virtual key documentation](https://docs.litellm.ai/docs/proxy/api_key_auth)
+
+```bash
+printf '%s\n' "$LITELLM_API_KEY" | publish/V2t.app/Contents/MacOS/V2t setup-litellm "$LITELLM_BASE_URL" "$LITELLM_MODEL"
+```
+
+Add `--reasoning-effort low` to request low reasoning effort on models that support it.
+
 To start recording from Spotlight, keep **V2t Record.app** beside **V2t.app** in a Spotlight-indexed folder such as `~/Applications`. Press **⌘Space**, search for **V2t Record**, and press **Return**. In the v2t window, click **Stop and Copy** to finish.
 
 The v2t menu bar icon also lets you start or stop recording and reopen the window with **Settings…**. The app runs in your user session and needs Microphone permission. You can grant it under **System Settings → Privacy & Security → Microphone**. On macOS 12, use **System Preferences → Security & Privacy → Privacy → Microphone**.
 
-The CLI is available inside the bundle at `publish/V2t.app/Contents/MacOS/V2t`. If your `whisper-server` is installed outside the usual executable directories, you can start v2t from Terminal with `V2T_WHISPER_SERVER` set to its absolute path. Quit v2t before rebuilding it. The build script signs the app locally for development.
+The CLI is available inside the bundle at `publish/V2t.app/Contents/MacOS/V2t`. If your `whisper-server` is installed outside the usual executable directories, you can start v2t from Terminal with `V2T_WHISPER_SERVER` set to its absolute path. Set `V2T_BUNDLE_WHISPER_SERVER` when building to include a compatible executable in the signed app. Later rebuilds reuse the bundled executable. Quit v2t before rebuilding it. The build script signs the app locally for development.
 
 ## Start V2T At Startup
 
@@ -95,7 +107,7 @@ v2t startup disable
 
 Linux uses the desktop session's autostart folder and macOS uses a per-user LaunchAgent. At login, v2t prepares installed models and keeps them available to `record` and `transcribe` through a private local socket. Audio capture starts with `record`. Run `v2t stop-background` to stop the current worker. The startup checkbox controls future logins. If you move the executable, open Settings from its new location and enable startup there.
 
-For a macOS source build, use Rust and the Xcode command-line tools. The CLI looks for macOS builds of `whisper-server` and `llama-server` beside it, on PATH, or in the usual Homebrew binary directories. Use `ffmpeg` with AVFoundation and allow your terminal to use the microphone for `v2t record`. The default model and configuration directory is `~/Library/Application Support/v2t`.
+For a macOS source build, use Rust and the Xcode command-line tools. The CLI looks for macOS builds of `whisper-server` and `llama-server` beside it, on PATH, or in the usual Homebrew binary directories. It can also use the `llama-server` installed by **Install Local AI** or `v2t setup --correction`. `--correct` uses the selected macOS correction provider while honoring the CLI's Dictionary preference. Use `ffmpeg` with AVFoundation and allow your terminal to use the microphone for `v2t record`. The default model and configuration directory is `~/Library/Application Support/v2t`.
 
 ## Build and test
 

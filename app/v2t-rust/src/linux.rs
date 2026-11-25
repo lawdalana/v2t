@@ -3,6 +3,8 @@ mod background;
 #[cfg(any(target_os = "macos", test))]
 mod clipboard;
 #[cfg(target_os = "macos")]
+mod litellm;
+#[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod macos;
 mod pipeline;
@@ -41,7 +43,7 @@ Speech options:
   --provider local|openai|openrouter  Transcription provider (default: local)
   --language th+en|th|en|auto        Speech language (default: th+en)
   --mai-backup                      Allow local failures to use MAI via OpenRouter with ZDR
-  --correct                         Apply optional local AI correction
+  --correct                         Apply optional AI correction
 
 WAV input: 16 kHz mono signed 16-bit PCM, up to five minutes.
 Recording uses parec on Linux and ffmpeg on macOS (default: five seconds).
@@ -61,6 +63,12 @@ enum Action {
     Setup {
         language: Option<&'static str>,
         correction: bool,
+    },
+    #[cfg(target_os = "macos")]
+    SetupLiteLlm {
+        base_url: String,
+        model: String,
+        reasoning_effort: Option<String>,
     },
     Transcribe {
         path: PathBuf,
@@ -84,7 +92,28 @@ struct SpeechOptions {
     provider: SpeechProvider,
     language: Option<&'static str>,
     mai_backup: bool,
-    correct: bool,
+    correct: CorrectionMode,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CorrectionMode {
+    Disabled,
+    FollowDictionary,
+    #[cfg(target_os = "macos")]
+    Enabled,
+    #[cfg(target_os = "macos")]
+    LiteLlm,
+}
+
+impl CorrectionMode {
+    fn enabled(&self, dictionary_enabled: bool) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::FollowDictionary => dictionary_enabled,
+            #[cfg(target_os = "macos")]
+            Self::Enabled | Self::LiteLlm => true,
+        }
+    }
 }
 
 impl Default for SpeechOptions {
@@ -93,7 +122,7 @@ impl Default for SpeechOptions {
             provider: SpeechProvider::Local,
             language: Some(MIXED),
             mai_backup: false,
-            correct: false,
+            correct: CorrectionMode::Disabled,
         }
     }
 }
@@ -109,6 +138,35 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Action
         Some("settings") if args.next().is_none() => return Ok(Action::Settings),
         Some("--background") if args.next().is_none() => return Ok(Action::Background),
         Some("stop-background") if args.next().is_none() => return Ok(Action::StopBackground),
+        #[cfg(target_os = "macos")]
+        Some("setup-litellm") => {
+            let usage = "Use v2t setup-litellm <HTTPS base URL> <model alias> [--reasoning-effort <level>] with the key on standard input.";
+            let base_url = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or(usage)?;
+            let model = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .ok_or(usage)?;
+            let reasoning_effort = match args.next() {
+                Some(flag) if flag == "--reasoning-effort" => Some(
+                    args.next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .ok_or(usage)?,
+                ),
+                Some(_) => return Err(usage),
+                None => None,
+            };
+            if args.next().is_some() {
+                return Err(usage);
+            }
+            return Ok(Action::SetupLiteLlm {
+                base_url,
+                model,
+                reasoning_effort,
+            });
+        }
         Some("startup") => {
             let action = match args.next().as_deref().and_then(|value| value.to_str()) {
                 Some("enable") => StartupAction::Enable,
@@ -151,7 +209,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Action
                 };
             }
             Some("--mai-backup") if mode != "setup" => options.mai_backup = true,
-            Some("--correct") if mode != "setup" => options.correct = true,
+            Some("--correct") if mode != "setup" => {
+                options.correct = CorrectionMode::FollowDictionary;
+            }
             Some("--correction") if mode == "setup" => correction = true,
             Some("--seconds") if mode == "record" => {
                 seconds = args
@@ -220,7 +280,13 @@ impl Storage {
 fn execute(action: Action) -> Result<()> {
     let output = |text: &str| writeln!(io::stdout().lock(), "{text}");
     match action {
-        Action::Help => output(HELP.trim_end())?,
+        Action::Help => {
+            output(HELP.trim_end())?;
+            #[cfg(target_os = "macos")]
+            output(
+                "\nmacOS LiteLLM setup: v2t setup-litellm <HTTPS base URL> <model alias> [--reasoning-effort <level>] (key via stdin)",
+            )?;
+        }
         Action::Version => output(concat!("v2t ", env!("CARGO_PKG_VERSION")))?,
         Action::Settings => startup::edit_settings()?,
         Action::Startup(action) => {
@@ -255,6 +321,17 @@ fn execute(action: Action) -> Result<()> {
                 models.install_speech(language, |progress| eprintln!("{progress}"))?;
             }
             eprintln!("Model is ready.");
+        }
+        #[cfg(target_os = "macos")]
+        Action::SetupLiteLlm {
+            base_url,
+            model,
+            reasoning_effort,
+        } => {
+            let storage = Storage::resolve()?;
+            litellm::setup(&storage.config, base_url, model, reasoning_effort)?;
+            macos::enable_litellm(&storage.config)?;
+            output("LiteLLM correction is enabled.")?;
         }
         Action::Transcribe { path, options } => {
             let wave = audio::read_wave(&path)?;
@@ -340,7 +417,7 @@ mod tests {
                     provider: SpeechProvider::Local,
                     language: Some("th+en"),
                     mai_backup: false,
-                    correct: false
+                    correct: CorrectionMode::Disabled
                 },
             })
         );
@@ -363,7 +440,7 @@ mod tests {
                     provider: SpeechProvider::Local,
                     language: Some("en"),
                     mai_backup: true,
-                    correct: false
+                    correct: CorrectionMode::Disabled
                 },
             })
         );

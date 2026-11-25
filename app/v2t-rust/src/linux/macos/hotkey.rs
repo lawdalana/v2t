@@ -20,6 +20,7 @@ const RELEASED: u32 = 6;
 const NOT_HANDLED: i32 = -9874;
 const EXCLUSIVE: u32 = 1;
 const COMMAND: u32 = 1 << 8;
+const OPTION: u32 = 1 << 11;
 const CONTROL: u32 = 1 << 12;
 const SHIFT: u32 = 1 << 9;
 
@@ -170,8 +171,11 @@ impl Registration {
         let (key, modifiers) = match shortcut {
             Shortcut::ControlShiftSpace => (0x31, CONTROL | SHIFT),
             Shortcut::CommandShiftSpace => (0x31, COMMAND | SHIFT),
+            Shortcut::CommandOptionSpace => (0x31, COMMAND | OPTION),
             Shortcut::ControlF9 => (0x65, CONTROL),
-            Shortcut::RightCommandOption | Shortcut::Off => return Ok(None),
+            Shortcut::RightCommandOption | Shortcut::RightOptionSpace | Shortcut::Off => {
+                return Ok(None);
+            }
         };
         let id = HotkeyId {
             signature: SIGNATURE,
